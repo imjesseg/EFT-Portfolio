@@ -13,6 +13,8 @@ from .data import fetch_all
 
 DEFAULT_UNIVERSE = Path(__file__).with_name("universe.json")
 RISK_FREE_TICKER = "BIL"  # 1-3 month T-bills
+FIDELITY_FUNDS = Path(__file__).with_name("fidelity_funds.json")
+FIDELITY_QUOTE_URL = "https://digital.fidelity.com/prgw/digital/research/quote/dashboard/summary?symbol={}"
 EXAMPLE = (
     "40% short term fixed income, 10% senior AAA rated fixed income, 10% commodities, "
     "20% growth equities, 20% defensive equities"
@@ -69,6 +71,52 @@ def triple(d: dict[str, float], fmt) -> str:
     return " / ".join(fmt(d[h]) for h in an.HORIZONS)
 
 
+def fidelity_matches(etfs: list[str], histories: dict, use_cache: bool) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Closest Fidelity mutual funds (by 12-month tracking error) for each ETF. Returns (matches, fetch errors)."""
+    funds = [t for group in json.loads(FIDELITY_FUNDS.read_text()).values() for t in group]
+    fetched, errors = fetch_all([t for t in dict.fromkeys(etfs + funds) if t not in histories], use_cache)
+    histories = {**histories, **fetched}
+    return {e: an.closest_funds(e, funds, histories) for e in etfs if e in histories}, errors
+
+
+def match_quality(match: dict) -> str:
+    # Tracking error alone suits cash-like funds whose daily moves are mostly noise; correlation suits equities.
+    if match["tracking_error"] <= 0.02 or match["correlation"] >= 0.95:
+        return "close"
+    if match["tracking_error"] <= 0.06 or match["correlation"] >= 0.80:
+        return "fair"
+    return "loose"
+
+
+def fund_link(ticker: str) -> str:
+    return f"[{ticker}]({FIDELITY_QUOTE_URL.format(ticker)})"
+
+
+def render_fidelity_table(matches: dict[str, list[dict]]) -> list[str]:
+    out = [
+        "| ETF | Closest Fidelity mutual fund | Match | Tracking error | Correlation | Beta | 12m return vs ETF | Next closest (tracking error) |",
+        "|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for etf, funds in matches.items():
+        if not funds:
+            out.append(f"| {etf} | no Fidelity fund with enough shared history | | | | | | |")
+            continue
+        best, rest = funds[0], funds[1:]
+        alternatives = ", ".join(f"{fund_link(f['ticker'])} ({pct(f['tracking_error'])})" for f in rest)
+        out.append(
+            f"| {etf} | {fund_link(best['ticker'])} {best['name']} | {match_quality(best)} | {pct(best['tracking_error'])} | "
+            f"{best['correlation']:.2f} | {best['beta']:.2f} | {pct(best['return_gap_12m'], True)} | {alternatives} |"
+        )
+    out += [
+        "",
+        "_Ranked by tracking error: the annualized volatility of the daily return difference over the last 12 months "
+        "(lower = follows the ETF more closely). \"12m return vs ETF\" is the fund's 12-month return minus the ETF's. "
+        "Match: close = tracking error ≤ 2% or correlation ≥ 0.95; fair = ≤ 6% or ≥ 0.80; loose = no close Fidelity "
+        "mutual fund equivalent. Check expense ratios, loads, and minimums on fidelity.com before switching._",
+    ]
+    return out
+
+
 def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
     tickers = sorted({t for key in allocation for t in universe[key]["tickers"]} | {RISK_FREE_TICKER})
     histories, errors = fetch_all(tickers, use_cache=not args.no_cache)
@@ -123,9 +171,16 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
             "stats": an.portfolio_stats(weights, histories, risk_free),
         }
 
+    fidelity = None
+    if args.fidelity:
+        held = sorted({t for name, p in portfolios.items() if not name.startswith("Category average") for t in p["weights"]})
+        fidelity, fund_errors = fidelity_matches(held, histories, use_cache=not args.no_cache)
+        skipped.update(fund_errors)
+
     as_of = max(histories[t].dates[-1] for t in histories)
     return {
         "as_of": as_of,
+        "fidelity": fidelity,
         "allocation": allocation,
         "risk_free_returns": risk_free,
         "ranked": ranked,
@@ -161,12 +216,20 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
             f"{pct(s['returns']['12m'], True)} | {pct(s['vol_12m'])} | {s['reward_risk_12m']:.2f} | "
             f"{pct(s['max_drawdown_12m'])} |"
         )
+    fidelity = report["fidelity"]
+    extra = (" Fidelity mutual fund |", "---|") if fidelity is not None else ("", "")
     for name, p in report["portfolios"].items():
         if name.startswith("Category average"):
             continue
-        out += ["", f"### {name}", "", p["description"], "", "| Weight | Ticker | Category | Fund |", "|---:|---|---|---|"]
+        out += ["", f"### {name}", "", p["description"], "", "| Weight | Ticker | Category | Fund |" + extra[0], "|---:|---|---|---|" + extra[1]]
         for t, wt in sorted(p["weights"].items(), key=lambda kv: -kv[1]):
-            out.append(f"| {pct(wt)} | {t} | {universe[report['category_of'][t]]['name']} | {report['names'][t]} |")
+            row = f"| {pct(wt)} | {t} | {universe[report['category_of'][t]]['name']} | {report['names'][t]} |"
+            if fidelity is not None:
+                best = fidelity.get(t)
+                row += f" {fund_link(best[0]['ticker'])} ({match_quality(best[0])}) |" if best else " — |"
+            out.append(row)
+    if fidelity is not None:
+        out += ["", "## Fidelity mutual fund equivalents", ""] + render_fidelity_table(fidelity)
 
     out += ["", "## Category rankings", ""]
     for key, metrics in report["ranked"].items():
@@ -222,6 +285,8 @@ def main(argv: list[str] | None = None) -> None:
         default=[0.2, 0.3, 0.5],
         help="Weights for 1m,3m,12m (default 0.2,0.3,0.5)",
     )
+    parser.add_argument("--fidelity", action="store_true", help="Add the closest Fidelity mutual fund for every suggested ETF")
+    parser.add_argument("--match", nargs="+", metavar="ETF", help="Only find the closest Fidelity mutual funds for these ETFs, e.g. --match XLP QQQ")
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
     parser.add_argument("--no-cache", action="store_true", help="Re-download prices even if cached today")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of Markdown")
@@ -231,6 +296,16 @@ def main(argv: list[str] | None = None) -> None:
     if args.list_categories:
         for key, spec in universe.items():
             print(f"{key}: {spec['name']}\n  aliases: {', '.join(spec['aliases'])}\n  ETFs: {' '.join(spec['tickers'])}")
+        return
+    if args.match:
+        etfs = [t.upper() for t in args.match]
+        matches, _ = fidelity_matches(etfs, {}, use_cache=not args.no_cache)
+        if args.json:
+            print(json.dumps(matches, indent=2))
+        else:
+            missing = [e for e in etfs if e not in matches]
+            lines = ["# Closest Fidelity mutual funds (last 12 months)", ""] + render_fidelity_table(matches)
+            print("\n".join(lines + ([f"\nNo price data for: {', '.join(missing)}"] if missing else [])))
         return
     if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:
         parser.error("--horizon-weights needs 3 numbers and --risk-weight must be between 0 and 1")

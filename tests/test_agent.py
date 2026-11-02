@@ -88,6 +88,19 @@ class PortfolioTest(unittest.TestCase):
         picks = an.pick_decorrelated(ranked, histories, 2, 0.95)
         self.assertEqual([m.ticker for m in picks], ["A", "B"])
 
+    def test_closest_fund_tracks_rather_than_merely_correlates(self):
+        rng = random.Random(2)
+        etf = [rng.gauss(0, 0.01) for _ in range(300)]
+        histories = {
+            "ETF": history("ETF", etf),
+            "LEVER": history("LEVER", [2 * r for r in etf]),  # correlation 1.0, but moves twice as much
+            "CLONE": history("CLONE", [r + rng.gauss(0, 0.001) for r in etf]),
+            "OTHER": history("OTHER", [rng.gauss(0, 0.01) for _ in range(300)]),
+        }
+        matches = an.closest_funds("ETF", ["OTHER", "LEVER", "CLONE"], histories)
+        self.assertEqual([m["ticker"] for m in matches], ["CLONE", "LEVER", "OTHER"])
+        self.assertAlmostEqual(matches[1]["beta"], 2.0)
+
     def test_daily_rebalanced_backtest(self):
         histories = {"UP": history("UP", [0.002] * 300), "FLAT": history("FLAT", [0.0] * 300)}
         stats = an.portfolio_stats({"UP": 0.25, "FLAT": 0.75}, histories, {})

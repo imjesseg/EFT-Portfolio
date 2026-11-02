@@ -31,6 +31,18 @@ Within each category, an ETF's score is its percentile rank on reward/risk and o
 
 Each is backtested over the last 12 months with daily rebalancing (returns, volatility, reward/risk, max drawdown). The backtest uses the same window the ETFs were selected on, so it is optimistic; past performance does not predict future returns, and this is not investment advice.
 
+## Fidelity mutual fund equivalents
+
+Find the Fidelity mutual fund that most closely tracks any ETF:
+
+```bash
+python3 -m etf_agent --match XLP QQQ SGOV
+```
+
+Or add `--fidelity` to a portfolio run to get a Fidelity equivalent for every suggested ETF. Funds are ranked by **tracking error** (annualized volatility of the daily return difference over the last 12 months), which also penalizes funds that move in the same direction but by more or less than the ETF. Each match shows correlation, beta, the 12-month return gap, and a close / fair / loose label; "loose" means Fidelity has no mutual fund with that exposure (e.g. gold bullion or commodity futures). Fund tickers link to their Fidelity research page.
+
+The candidate list of ~100 retail Fidelity mutual funds (Select sector, index, active equity, allocation, and bond funds) lives in [`etf_agent/fidelity_funds.json`](etf_agent/fidelity_funds.json). Money market funds are excluded because their constant $1 price carries no tracking information.
+
 ## Categories
 
 `python3 -m etf_agent --list-categories` shows every category, the phrases it matches, and its ETFs. Edit [`etf_agent/universe.json`](etf_agent/universe.json) to add categories or tickers, or pass `--universe my.json`. Allocations can also use exact keys: `"short_term_fixed_income=40, growth_equity=60"`.

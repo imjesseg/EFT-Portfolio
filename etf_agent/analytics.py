@@ -113,6 +113,29 @@ def correlation(a: list[float], b: list[float]) -> float:
     return statistics.correlation(a, b) if statistics.pstdev(a) and statistics.pstdev(b) else 0.0
 
 
+def tracking_stats(target: str, fund: str, histories: dict[str, History]) -> dict | None:
+    """How closely ``fund`` followed ``target`` over the last 12 months of shared trading days."""
+    series = aligned_returns(histories, [target, fund])
+    a, b = series[target], series[fund]
+    if len(a) < 60:
+        return None
+    variance = statistics.variance(a)
+    return {
+        "ticker": fund,
+        "name": histories[fund].name,
+        "tracking_error": annual_vol([y - x for x, y in zip(a, b)]),
+        "correlation": correlation(a, b),
+        "beta": statistics.covariance(a, b) / variance if variance else 0.0,
+        "return_gap_12m": math.prod(1 + r for r in b) - math.prod(1 + r for r in a),
+    }
+
+
+def closest_funds(target: str, funds: list[str], histories: dict[str, History], count: int = 3) -> list[dict]:
+    """Funds ranked by lowest tracking error against ``target`` (a high-beta fund can correlate well yet track badly)."""
+    stats = [tracking_stats(target, f, histories) for f in funds if f in histories and f != target]
+    return sorted((s for s in stats if s), key=lambda s: s["tracking_error"])[:count]
+
+
 def pick_decorrelated(ranked: list[Metrics], histories: dict[str, History], count: int, max_corr: float) -> list[Metrics]:
     """Best-scoring ETFs, skipping near-duplicates of an ETF already picked (e.g. QQQ vs QQQM)."""
     if not ranked:

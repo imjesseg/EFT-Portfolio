@@ -1,0 +1,7 @@
+{
+  "sector": ["FDFAX", "FSUTX", "FSPHX", "FBIOX", "FSELX", "FSPTX", "FSCSX", "FSENX", "FSRFX", "FSDAX", "FIDSX", "FSRBX", "FSRPX", "FSCPX", "FSDPX", "FSTCX", "FBMPX", "FSAGX", "FSHCX", "FSMEX", "FSPCX", "FSVLX", "FSLBX", "FNARX", "FSAVX", "FSHOX", "FDLSX", "FSCHX", "FPHAX", "FRESX"],
+  "equity_index": ["FXAIX", "FSKAX", "FZROX", "FNILX", "FSMDX", "FSSNX", "FSMAX", "FSPGX", "FLCOX", "FMDGX", "FECGX", "FNCMX", "FSRNX", "FPADX", "FSPSX", "FTIHX", "FZILX", "FSGGX"],
+  "equity_active": ["FCNTX", "FBGRX", "FDGRX", "FOCPX", "FMAGX", "FDEGX", "FDVLX", "FEQIX", "FDGFX", "FLPSX", "FVDFX", "FBCVX", "FGRTX", "FSCRX", "FSLCX", "FMCSX", "FTQGX", "FMILX", "FGRIX", "FDSVX", "FTRNX", "FSMVX", "FCPVX", "FDIVX", "FIGRX", "FIGFX", "FEMKX", "FSEAX", "FJPNX", "FHKCX", "FIEUX", "FICDX", "FFGCX"],
+  "allocation": ["FBALX", "FPURX"],
+  "fixed_income": ["FCNVX", "FSHBX", "FUMBX", "FUAMX", "FNBGX", "FIPDX", "FXNAX", "FTBFX", "FBNDX", "FTHRX", "FGOVX", "FSTGX", "FGMNX", "FCBFX", "FFRHX", "SPHIX", "FAGIX", "FNMIX", "FSRRX", "FHIGX", "FLTMX"]
+}

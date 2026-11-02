@@ -16,4 +16,4 @@ build-backend = "setuptools.build_meta"
 packages = ["etf_agent"]
 
 [tool.setuptools.package-data]
-etf_agent = ["universe.json"]
+etf_agent = ["universe.json", "fidelity_funds.json"]
