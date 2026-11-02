@@ -71,48 +71,59 @@ def triple(d: dict[str, float], fmt) -> str:
     return " / ".join(fmt(d[h]) for h in an.HORIZONS)
 
 
-def fidelity_matches(etfs: list[str], histories: dict, use_cache: bool) -> tuple[dict[str, list[dict]], dict[str, str]]:
-    """Closest Fidelity mutual funds (by 12-month tracking error) for each ETF. Returns (matches, fetch errors)."""
+def fidelity_matches(
+    etfs: list[str], histories: dict, use_cache: bool, prefer_sortino: bool
+) -> tuple[dict[str, dict], dict[str, str]]:
+    """Closest Fidelity mutual funds for each ETF: {etf: {"sortino_12m", "funds"}}. Returns (matches, fetch errors)."""
     funds = [t for group in json.loads(FIDELITY_FUNDS.read_text()).values() for t in group]
-    fetched, errors = fetch_all([t for t in dict.fromkeys(etfs + funds) if t not in histories], use_cache)
+    wanted = dict.fromkeys(etfs + funds + [RISK_FREE_TICKER])
+    fetched, errors = fetch_all([t for t in wanted if t not in histories], use_cache)
     histories = {**histories, **fetched}
-    return {e: an.closest_funds(e, funds, histories) for e in etfs if e in histories}, errors
-
-
-def match_quality(match: dict) -> str:
-    # Tracking error alone suits cash-like funds whose daily moves are mostly noise; correlation suits equities.
-    if match["tracking_error"] <= 0.02 or match["correlation"] >= 0.95:
-        return "close"
-    if match["tracking_error"] <= 0.06 or match["correlation"] >= 0.80:
-        return "fair"
-    return "loose"
+    rf = an.total_return(histories[RISK_FREE_TICKER].prices, an.TRADING_DAYS) if RISK_FREE_TICKER in histories else 0.0
+    matches = {
+        e: {
+            "sortino_12m": an.sortino(histories[e].prices, rf, min(an.TRADING_DAYS, len(histories[e].prices) - 1)),
+            "funds": an.closest_funds(e, funds, histories, rf, prefer_sortino=prefer_sortino),
+        }
+        for e in etfs
+        if e in histories
+    }
+    return matches, errors
 
 
 def fund_link(ticker: str) -> str:
     return f"[{ticker}]({FIDELITY_QUOTE_URL.format(ticker)})"
 
 
-def render_fidelity_table(matches: dict[str, list[dict]]) -> list[str]:
+def render_fidelity_table(matches: dict[str, dict], prefer_sortino: bool) -> list[str]:
     out = [
-        "| ETF | Closest Fidelity mutual fund | Match | Tracking error | Correlation | Beta | 12m return vs ETF | Next closest (tracking error) |",
-        "|---|---|---|---:|---:|---:|---:|---|",
+        "| ETF | Suggested Fidelity mutual fund | Match | Tracking error | Correlation | Beta | 12m return vs ETF "
+        "| Sortino 12m (ETF → fund) | Other candidates (tracking error, Sortino) |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|",
     ]
-    for etf, funds in matches.items():
-        if not funds:
-            out.append(f"| {etf} | no Fidelity fund with enough shared history | | | | | | |")
+    for etf, match in matches.items():
+        if not match["funds"]:
+            out.append(f"| {etf} | no Fidelity fund with enough shared history | | | | | | | |")
             continue
-        best, rest = funds[0], funds[1:]
-        alternatives = ", ".join(f"{fund_link(f['ticker'])} ({pct(f['tracking_error'])})" for f in rest)
+        best, rest = match["funds"][0], match["funds"][1:]
+        others = ", ".join(f"{fund_link(f['ticker'])} ({pct(f['tracking_error'])}, {f['sortino_12m']:.2f})" for f in rest)
         out.append(
-            f"| {etf} | {fund_link(best['ticker'])} {best['name']} | {match_quality(best)} | {pct(best['tracking_error'])} | "
-            f"{best['correlation']:.2f} | {best['beta']:.2f} | {pct(best['return_gap_12m'], True)} | {alternatives} |"
+            f"| {etf} | {fund_link(best['ticker'])} {best['name']} | {an.match_quality(best)} | {pct(best['tracking_error'])} | "
+            f"{best['correlation']:.2f} | {best['beta']:.2f} | {pct(best['return_gap_12m'], True)} | "
+            f"{match['sortino_12m']:.2f} → {best['sortino_12m']:.2f} | {others} |"
         )
+    selection = (
+        "Candidates are the 3 funds with the lowest tracking error; among those with a match as good as the closest one, "
+        "the highest 12-month Sortino is suggested."
+        if prefer_sortino
+        else "The fund with the lowest tracking error is suggested."
+    )
     out += [
         "",
-        "_Ranked by tracking error: the annualized volatility of the daily return difference over the last 12 months "
-        "(lower = follows the ETF more closely). \"12m return vs ETF\" is the fund's 12-month return minus the ETF's. "
-        "Match: close = tracking error ≤ 2% or correlation ≥ 0.95; fair = ≤ 6% or ≥ 0.80; loose = no close Fidelity "
-        "mutual fund equivalent. Check expense ratios, loads, and minimums on fidelity.com before switching._",
+        f"_{selection} Tracking error is the annualized volatility of the daily return difference over the last "
+        "12 months (lower = follows the ETF more closely). \"12m return vs ETF\" is the fund's 12-month return minus "
+        "the ETF's. Match: close = tracking error ≤ 2% or correlation ≥ 0.95; fair = ≤ 6% or ≥ 0.80; loose = no close "
+        "Fidelity mutual fund equivalent. Check expense ratios, loads, and minimums on fidelity.com before switching._",
     ]
     return out
 
@@ -140,14 +151,19 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
                 skipped[t] = "less than 12 months of history"
         if not metrics:
             raise SystemExit(f"No usable price data for category '{key}'.")
-        ranked[key] = an.score_category(metrics, horizon_weights, args.risk_weight)
+        ranked[key] = an.score_category(metrics, horizon_weights, args.risk_weight, "sortino" if args.sortino else "reward_risk")
 
+    weigh, weighting = (
+        (an.sortino_weights, "weights proportional to 12-month Sortino (picks with Sortino ≤ 0 get none)")
+        if args.sortino
+        else (an.inverse_vol_weights, "inverse-volatility weights")
+    )
     portfolios = {}
     builders = {
         "Best-in-class": "Top-scoring ETF in each category gets the full category weight.",
         "Diversified": f"Top {args.picks} per category, skipping near-duplicates (daily-return correlation "
-        f">= {args.max_corr}); inverse-volatility weights within each category.",
-        "Low-volatility": "The 2 lowest-volatility ETFs from the top half of each category; inverse-volatility weights.",
+        f">= {args.max_corr}); {weighting} within each category.",
+        "Low-volatility": f"The 2 lowest-volatility ETFs from the top half of each category; {weighting}.",
         "Category average (baseline)": "Every ETF in each category equally weighted - what the picks must beat.",
     }
     for name, description in builders.items():
@@ -158,13 +174,14 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
             if name == "Best-in-class":
                 part = {peers[0].ticker: share}
             elif name == "Diversified":
-                part = an.inverse_vol_weights(an.pick_decorrelated(peers, histories, args.picks, args.max_corr), share)
+                part = weigh(an.pick_decorrelated(peers, histories, args.picks, args.max_corr), share)
             elif name == "Low-volatility":
-                part = an.inverse_vol_weights(an.pick_low_vol(peers, 2), share)
+                part = weigh(an.pick_low_vol(peers, 2), share)
             else:
                 part = {m.ticker: share / len(peers) for m in peers}
             for t, w in part.items():
-                weights[t] = weights.get(t, 0.0) + w
+                if w > 0:
+                    weights[t] = weights.get(t, 0.0) + w
         portfolios[name] = {
             "description": description,
             "weights": weights,
@@ -174,7 +191,7 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
     fidelity = None
     if args.fidelity:
         held = sorted({t for name, p in portfolios.items() if not name.startswith("Category average") for t in p["weights"]})
-        fidelity, fund_errors = fidelity_matches(held, histories, use_cache=not args.no_cache)
+        fidelity, fund_errors = fidelity_matches(held, histories, not args.no_cache, args.sortino)
         skipped.update(fund_errors)
 
     as_of = max(histories[t].dates[-1] for t in histories)
@@ -198,23 +215,26 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
         "Target mix: " + ", ".join(f"{v:g}% {universe[k]['name']}" for k, v in report["allocation"].items())
     )
     w = args.horizon_weights
+    measure = (
+        "Sortino (return above T-bills ÷ downside deviation)" if args.sortino else "reward/risk (return above T-bills ÷ volatility)"
+    )
     out += [
         "",
         f"Scoring: each ETF is ranked against its category peers on 1m/3m/12m performance "
-        f"(horizon weights {w[0]:g}/{w[1]:g}/{w[2]:g}); {args.risk_weight:.0%} of each rank is reward/risk "
-        f"(return above T-bills ÷ volatility) and {1 - args.risk_weight:.0%} is raw return. Score 1.00 = best in category.",
+        f"(horizon weights {w[0]:g}/{w[1]:g}/{w[2]:g}); {args.risk_weight:.0%} of each rank is {measure} "
+        f"and {1 - args.risk_weight:.0%} is raw return. Score 1.00 = best in category.",
         "",
         "## Sample portfolios",
         "",
-        "| Portfolio | 1m | 3m | 12m | Vol (12m) | Reward/risk (12m) | Max drawdown (12m) |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Portfolio | 1m | 3m | 12m | Vol (12m) | Reward/risk (12m) | Sortino (12m) | Max drawdown (12m) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, p in report["portfolios"].items():
         s = p["stats"]
         out.append(
             f"| {name} | {pct(s['returns']['1m'], True)} | {pct(s['returns']['3m'], True)} | "
             f"{pct(s['returns']['12m'], True)} | {pct(s['vol_12m'])} | {s['reward_risk_12m']:.2f} | "
-            f"{pct(s['max_drawdown_12m'])} |"
+            f"{s['sortino_12m']:.2f} | {pct(s['max_drawdown_12m'])} |"
         )
     fidelity = report["fidelity"]
     extra = (" Fidelity mutual fund |", "---|") if fidelity is not None else ("", "")
@@ -225,25 +245,26 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
         for t, wt in sorted(p["weights"].items(), key=lambda kv: -kv[1]):
             row = f"| {pct(wt)} | {t} | {universe[report['category_of'][t]]['name']} | {report['names'][t]} |"
             if fidelity is not None:
-                best = fidelity.get(t)
-                row += f" {fund_link(best[0]['ticker'])} ({match_quality(best[0])}) |" if best else " — |"
+                funds = fidelity.get(t, {}).get("funds")
+                row += f" {fund_link(funds[0]['ticker'])} ({an.match_quality(funds[0])}) |" if funds else " — |"
             out.append(row)
     if fidelity is not None:
-        out += ["", "## Fidelity mutual fund equivalents", ""] + render_fidelity_table(fidelity)
+        out += ["", "## Fidelity mutual fund equivalents", ""] + render_fidelity_table(fidelity, args.sortino)
 
     out += ["", "## Category rankings", ""]
     for key, metrics in report["ranked"].items():
         out += [
             f"### {universe[key]['name']} — {report['allocation'][key]:g}% ({len(metrics)} ETFs ranked)",
             "",
-            "| # | Ticker | Score | Return 1m / 3m / 12m | vs peer median 1m / 3m / 12m | Reward/risk 1m / 3m / 12m | Vol (12m) | Max DD | Fund |",
-            "|---:|---|---:|---|---|---|---:|---:|---|",
+            "| # | Ticker | Score | Return 1m / 3m / 12m | vs peer median 1m / 3m / 12m | Reward/risk 1m / 3m / 12m "
+            "| Sortino 1m / 3m / 12m | Vol (12m) | Max DD | Fund |",
+            "|---:|---|---:|---|---|---|---|---:|---:|---|",
         ]
         for i, m in enumerate(metrics[: args.top], 1):
             out.append(
                 f"| {i} | {m.ticker} | {m.score:.2f} | {triple(m.returns, lambda x: pct(x, True))} | "
                 f"{triple(m.relative, lambda x: pct(x, True))} | {triple(m.reward_risk, lambda x: f'{x:.2f}')} | "
-                f"{pct(m.vols['12m'])} | {pct(m.max_drawdown)} | {m.name} |"
+                f"{triple(m.sortino, lambda x: f'{x:.2f}')} | {pct(m.vols['12m'])} | {pct(m.max_drawdown)} | {m.name} |"
             )
         out.append("")
 
@@ -259,7 +280,8 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
 
 def to_json(report: dict) -> str:
     def metrics_dict(m: an.Metrics) -> dict:
-        return {k: getattr(m, k) for k in ("ticker", "name", "score", "returns", "relative", "reward_risk", "vols", "max_drawdown")}
+        keys = ("ticker", "name", "score", "returns", "relative", "reward_risk", "sortino", "vols", "max_drawdown")
+        return {k: getattr(m, k) for k in keys}
 
     payload = {**report, "ranked": {k: [metrics_dict(m) for m in ms] for k, ms in report["ranked"].items()}}
     del payload["category_of"]
@@ -285,6 +307,12 @@ def main(argv: list[str] | None = None) -> None:
         default=[0.2, 0.3, 0.5],
         help="Weights for 1m,3m,12m (default 0.2,0.3,0.5)",
     )
+    parser.add_argument(
+        "--sortino",
+        action="store_true",
+        help="Use Sortino (downside-only risk) instead of volatility: rank on Sortino, weight picks by 12-month "
+        "Sortino, and suggest the higher-Sortino Fidelity fund among equally good matches",
+    )
     parser.add_argument("--fidelity", action="store_true", help="Add the closest Fidelity mutual fund for every suggested ETF")
     parser.add_argument("--match", nargs="+", metavar="ETF", help="Only find the closest Fidelity mutual funds for these ETFs, e.g. --match XLP QQQ")
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
@@ -299,12 +327,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.match:
         etfs = [t.upper() for t in args.match]
-        matches, _ = fidelity_matches(etfs, {}, use_cache=not args.no_cache)
+        matches, _ = fidelity_matches(etfs, {}, not args.no_cache, args.sortino)
         if args.json:
             print(json.dumps(matches, indent=2))
         else:
             missing = [e for e in etfs if e not in matches]
-            lines = ["# Closest Fidelity mutual funds (last 12 months)", ""] + render_fidelity_table(matches)
+            lines = ["# Closest Fidelity mutual funds (last 12 months)", ""] + render_fidelity_table(matches, args.sortino)
             print("\n".join(lines + ([f"\nNo price data for: {', '.join(missing)}"] if missing else [])))
         return
     if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:

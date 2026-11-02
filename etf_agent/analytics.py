@@ -20,6 +20,7 @@ class Metrics:
     returns: dict[str, float]  # total return per horizon
     vols: dict[str, float]  # annualized volatility of daily returns per horizon
     reward_risk: dict[str, float]  # (return - T-bill return) / volatility over the same horizon
+    sortino: dict[str, float]  # (return - T-bill return) / downside deviation over the same horizon
     max_drawdown: float  # worst peak-to-trough over the last 12 months
     relative: dict[str, float] = field(default_factory=dict)  # return minus category median
     score: float = 0.0  # 0..1 composite rank within the category
@@ -51,16 +52,27 @@ def reward_risk(ret: float, risk_free: float, vol: float, days: int) -> float:
     return (ret - risk_free) / period_vol if period_vol > 0 else 0.0
 
 
+def sortino(prices: list[float], risk_free: float, days: int) -> float:
+    """Sortino ratio for a single horizon: like ``reward_risk``, but only days that trailed T-bills count as risk."""
+    window = prices[-1 - days:]
+    hurdle = (1 + risk_free) ** (1 / days) - 1  # T-bill return per day
+    shortfalls = [min(r - hurdle, 0.0) for r in daily_returns(window)]
+    period_downside = math.sqrt(sum(s * s for s in shortfalls) / len(shortfalls) * days)
+    return (total_return(window, days) - risk_free) / period_downside if period_downside > 0 else 0.0
+
+
 def compute_metrics(history: History, category: str, risk_free: dict[str, float]) -> Metrics | None:
     prices = history.prices
     if len(prices) <= TRADING_DAYS:
         return None  # less than 12 months of history
-    rets, vols, rr = {}, {}, {}
+    rets, vols, rr, sort = {}, {}, {}, {}
     for label, days in HORIZONS.items():
+        rf = risk_free.get(label, 0.0)
         rets[label] = total_return(prices, days)
         vols[label] = annual_vol(daily_returns(prices[-1 - days:]))
-        rr[label] = reward_risk(rets[label], risk_free.get(label, 0.0), vols[label], days)
-    return Metrics(history.ticker, history.name, category, rets, vols, rr, max_drawdown(prices[-1 - TRADING_DAYS:]))
+        rr[label] = reward_risk(rets[label], rf, vols[label], days)
+        sort[label] = sortino(prices, rf, days)
+    return Metrics(history.ticker, history.name, category, rets, vols, rr, sort, max_drawdown(prices[-1 - TRADING_DAYS:]))
 
 
 def percentile_ranks(values: list[float]) -> list[float]:
@@ -81,11 +93,14 @@ def percentile_ranks(values: list[float]) -> list[float]:
     return ranks
 
 
-def score_category(metrics: list[Metrics], horizon_weights: dict[str, float], risk_weight: float) -> list[Metrics]:
+def score_category(
+    metrics: list[Metrics], horizon_weights: dict[str, float], risk_weight: float, risk_measure: str = "reward_risk"
+) -> list[Metrics]:
     """Rank ETFs against their category peers and return them best first.
 
-    For each horizon an ETF earns a blend of its peer percentile on reward/risk (weight ``risk_weight``)
-    and on raw return (weight ``1 - risk_weight``); horizons are combined with ``horizon_weights``.
+    For each horizon an ETF earns a blend of its peer percentile on ``risk_measure`` ("reward_risk" or
+    "sortino", weight ``risk_weight``) and on raw return (weight ``1 - risk_weight``); horizons are
+    combined with ``horizon_weights``.
     """
     total_weight = sum(horizon_weights.values())
     for m in metrics:
@@ -94,7 +109,7 @@ def score_category(metrics: list[Metrics], horizon_weights: dict[str, float], ri
         returns = [m.returns[label] for m in metrics]
         median = statistics.median(returns)
         return_ranks = percentile_ranks(returns)
-        rr_ranks = percentile_ranks([m.reward_risk[label] for m in metrics])
+        rr_ranks = percentile_ranks([getattr(m, risk_measure)[label] for m in metrics])
         for m, ret_rank, rr_rank in zip(metrics, return_ranks, rr_ranks):
             m.relative[label] = m.returns[label] - median
             blended = risk_weight * rr_rank + (1 - risk_weight) * ret_rank
@@ -113,7 +128,7 @@ def correlation(a: list[float], b: list[float]) -> float:
     return statistics.correlation(a, b) if statistics.pstdev(a) and statistics.pstdev(b) else 0.0
 
 
-def tracking_stats(target: str, fund: str, histories: dict[str, History]) -> dict | None:
+def tracking_stats(target: str, fund: str, histories: dict[str, History], risk_free_12m: float = 0.0) -> dict | None:
     """How closely ``fund`` followed ``target`` over the last 12 months of shared trading days."""
     series = aligned_returns(histories, [target, fund])
     a, b = series[target], series[fund]
@@ -127,13 +142,46 @@ def tracking_stats(target: str, fund: str, histories: dict[str, History]) -> dic
         "correlation": correlation(a, b),
         "beta": statistics.covariance(a, b) / variance if variance else 0.0,
         "return_gap_12m": math.prod(1 + r for r in b) - math.prod(1 + r for r in a),
+        "sortino_12m": sortino(histories[fund].prices, risk_free_12m, min(TRADING_DAYS, len(histories[fund].prices) - 1)),
     }
 
 
-def closest_funds(target: str, funds: list[str], histories: dict[str, History], count: int = 3) -> list[dict]:
-    """Funds ranked by lowest tracking error against ``target`` (a high-beta fund can correlate well yet track badly)."""
-    stats = [tracking_stats(target, f, histories) for f in funds if f in histories and f != target]
-    return sorted((s for s in stats if s), key=lambda s: s["tracking_error"])[:count]
+MATCH_TIERS = ("close", "fair", "loose")
+
+
+def match_quality(match: dict) -> str:
+    # Tracking error alone suits cash-like funds whose daily moves are mostly noise; correlation suits equities.
+    if match["tracking_error"] <= 0.02 or match["correlation"] >= 0.95:
+        return "close"
+    if match["tracking_error"] <= 0.06 or match["correlation"] >= 0.80:
+        return "fair"
+    return "loose"
+
+
+def closest_funds(
+    target: str,
+    funds: list[str],
+    histories: dict[str, History],
+    risk_free_12m: float = 0.0,
+    count: int = 3,
+    prefer_sortino: bool = False,
+) -> list[dict]:
+    """The ``count`` funds with the lowest tracking error against ``target``, best first.
+
+    Tracking error, not correlation, because a high-beta fund can correlate well yet track badly. With
+    ``prefer_sortino``, funds whose match quality is as good as the closest fund's are reordered by
+    12-month Sortino, so a better downside-adjusted fund wins among equally good matches.
+    """
+    stats = [tracking_stats(target, f, histories, risk_free_12m) for f in funds if f in histories and f != target]
+    ranked = sorted((s for s in stats if s), key=lambda s: s["tracking_error"])[:count]
+    if prefer_sortino and ranked:
+        best_tier = MATCH_TIERS.index(match_quality(ranked[0]))
+        ranked.sort(
+            key=lambda s: (0, -s["sortino_12m"])
+            if MATCH_TIERS.index(match_quality(s)) <= best_tier
+            else (1, s["tracking_error"])
+        )
+    return ranked
 
 
 def pick_decorrelated(ranked: list[Metrics], histories: dict[str, History], count: int, max_corr: float) -> list[Metrics]:
@@ -162,6 +210,15 @@ def inverse_vol_weights(picks: list[Metrics], allocation: float) -> dict[str, fl
     return {t: allocation * v / total for t, v in inverse.items()}
 
 
+def sortino_weights(picks: list[Metrics], allocation: float) -> dict[str, float]:
+    """Weights proportional to 12-month Sortino; picks with no excess return get nothing (equal if none qualify)."""
+    positive = {m.ticker: max(m.sortino["12m"], 0.0) for m in picks}
+    total = sum(positive.values())
+    if total == 0:
+        return {m.ticker: allocation / len(picks) for m in picks}
+    return {t: allocation * v / total for t, v in positive.items()}
+
+
 def portfolio_stats(weights: dict[str, float], histories: dict[str, History], risk_free: dict[str, float]) -> dict:
     """Backtest constant (daily-rebalanced) weights over the last 12 months."""
     series = aligned_returns(histories, list(weights))
@@ -177,5 +234,6 @@ def portfolio_stats(weights: dict[str, float], histories: dict[str, History], ri
         "returns": rets,
         "vol_12m": vol,
         "reward_risk_12m": reward_risk(rets["12m"], risk_free.get("12m", 0.0), vol, days["12m"]),
+        "sortino_12m": sortino(nav, risk_free.get("12m", 0.0), days["12m"]),
         "max_drawdown_12m": max_drawdown(nav),
     }
