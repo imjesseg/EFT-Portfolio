@@ -1,0 +1,87 @@
+{
+  "short_term_fixed_income": {
+    "name": "Short-term fixed income",
+    "aliases": ["short term", "short duration", "ultra short", "cash", "t bill", "treasury bill", "money market", "floating rate treasury"],
+    "tickers": ["SGOV", "BIL", "SHV", "USFR", "TFLO", "SHY", "VGSH", "SCHO", "SPTS", "BSV", "VCSH", "SPSB", "IGSB", "JPST", "MINT", "NEAR", "FLOT", "ICSH", "GSY"]
+  },
+  "aaa_fixed_income": {
+    "name": "Senior AAA-rated fixed income (AAA CLO tranches)",
+    "aliases": ["aaa", "senior", "clo", "triple a"],
+    "tickers": ["JAAA", "PAAA", "CLOA", "AAA", "CLOX", "ICLO"]
+  },
+  "treasury": {
+    "name": "Intermediate/long US Treasuries",
+    "aliases": ["treasury", "treasuries", "government bond", "govt"],
+    "tickers": ["GOVT", "IEF", "VGIT", "SCHR", "TLT"]
+  },
+  "agency_mbs": {
+    "name": "Agency mortgage-backed securities",
+    "aliases": ["mbs", "mortgage", "agency"],
+    "tickers": ["MBB", "VMBS", "SPMB"]
+  },
+  "core_bonds": {
+    "name": "Core / aggregate bonds",
+    "aliases": ["aggregate", "core bond", "total bond", "broad bond", "bonds"],
+    "tickers": ["AGG", "BND"]
+  },
+  "ig_corporate": {
+    "name": "Investment-grade corporate bonds",
+    "aliases": ["investment grade", "corporate", "ig credit"],
+    "tickers": ["LQD", "VCIT", "IGIB"]
+  },
+  "high_yield": {
+    "name": "High-yield credit",
+    "aliases": ["high yield", "junk", "below investment grade", "bbb clo"],
+    "tickers": ["HYG", "JNK", "USHY", "SHYG", "JBBB"]
+  },
+  "tips": {
+    "name": "Inflation-protected bonds (TIPS)",
+    "aliases": ["tips", "inflation protected", "inflation linked"],
+    "tickers": ["TIP", "SCHP", "VTIP", "STIP"]
+  },
+  "commodities": {
+    "name": "Commodities (broad baskets, metals, energy, agriculture)",
+    "aliases": ["commodit", "gold", "precious metal", "real asset", "raw material"],
+    "tickers": ["DBC", "GSG", "PDBC", "BCI", "COMT", "COM", "DJP", "CMDY", "FTGC", "BCD", "GLD", "IAU", "GLDM", "SLV", "DBA", "USO", "CPER"]
+  },
+  "growth_equity": {
+    "name": "Growth equities",
+    "aliases": ["growth", "nasdaq", "tech"],
+    "tickers": ["QQQ", "QQQM", "VUG", "SCHG", "IWF", "SPYG", "MGK", "VONG", "IUSG", "RPG", "IWO", "VBK", "MTUM"]
+  },
+  "defensive_equity": {
+    "name": "Defensive equities (staples, utilities, health care, low volatility)",
+    "aliases": ["defensive", "low vol", "minimum vol", "min vol", "staples", "utilities", "health care", "healthcare"],
+    "tickers": ["XLU", "XLP", "XLV", "VPU", "VDC", "VHT", "FSTA", "FUTY", "FHLC", "IDU", "USMV", "SPLV", "SPHD"]
+  },
+  "dividend_equity": {
+    "name": "Dividend / quality equities",
+    "aliases": ["dividend", "income equit", "quality", "dividend growth"],
+    "tickers": ["SCHD", "VIG", "DGRO", "NOBL", "QUAL"]
+  },
+  "value_equity": {
+    "name": "Value equities",
+    "aliases": ["value"],
+    "tickers": ["VTV", "SCHV", "IWD", "RPV"]
+  },
+  "small_cap_equity": {
+    "name": "US small-cap equities",
+    "aliases": ["small cap", "smallcap", "small companies"],
+    "tickers": ["IJR", "VB", "IWM", "SCHA"]
+  },
+  "international_equity": {
+    "name": "International developed equities",
+    "aliases": ["international", "developed", "foreign", "ex us", "eafe"],
+    "tickers": ["VEA", "IEFA", "EFA", "SCHF"]
+  },
+  "emerging_markets": {
+    "name": "Emerging-market equities",
+    "aliases": ["emerging", "em equit"],
+    "tickers": ["VWO", "IEMG", "EEM"]
+  },
+  "real_estate": {
+    "name": "Real estate (REITs)",
+    "aliases": ["real estate", "reit", "property"],
+    "tickers": ["VNQ", "XLRE", "SCHH"]
+  }
+}

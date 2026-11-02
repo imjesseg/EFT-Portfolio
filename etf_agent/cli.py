@@ -1,0 +1,247 @@
+"""Command-line agent: turn a target sector mix into ranked ETF candidates and sample portfolios."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+from . import analytics as an
+from .data import fetch_all
+
+DEFAULT_UNIVERSE = Path(__file__).with_name("universe.json")
+RISK_FREE_TICKER = "BIL"  # 1-3 month T-bills
+EXAMPLE = (
+    "40% short term fixed income, 10% senior AAA rated fixed income, 10% commodities, "
+    "20% growth equities, 20% defensive equities"
+)
+
+
+def _normalize(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9%.]+", " ", text.lower().replace("_", " ")).split())
+
+
+def match_category(label: str, universe: dict) -> str | None:
+    """Map free text like 'growth equities' to a category key (exact key, else longest alias found)."""
+    text = _normalize(label)
+    for key in universe:
+        if text == _normalize(key):
+            return key
+    best, best_len = None, 0
+    for key, spec in universe.items():
+        for alias in spec["aliases"]:
+            if re.search(r"\b" + re.escape(_normalize(alias)), text) and len(alias) > best_len:
+                best, best_len = key, len(alias)
+    return best
+
+
+def parse_allocation(text: str, universe: dict) -> tuple[dict[str, float], list[str]]:
+    """Parse '40% short term fixed income, 20% growth' (or 'growth=20') into {category: percent}."""
+    allocation: dict[str, float] = {}
+    notes: list[str] = []
+    chunks = [c for c in re.split(r"[,;\n+]|\s+and\s+(?=\d)", text) if c.strip()]
+    for chunk in chunks:
+        # Prefer a number marked with %, so labels like "1-3 year treasuries 20%" work.
+        number = re.search(r"\d+(?:\.\d+)?(?=\s*%)", chunk) or re.search(r"\d+(?:\.\d+)?", chunk)
+        if not number:
+            raise ValueError(f"No percentage found in '{chunk.strip()}'")
+        label = (chunk[: number.start()] + " " + chunk[number.end():]).replace("%", " ").replace("=", " ").replace(":", " ")
+        key = match_category(label, universe)
+        if key is None:
+            raise ValueError(f"Could not match '{label.strip()}' to a category. Run with --list-categories.")
+        allocation[key] = allocation.get(key, 0.0) + float(number.group())
+    total = sum(allocation.values())
+    if abs(total - 100) > 0.01:
+        scale = 100 if abs(total - 1) <= 0.01 else 100 / total
+        if scale != 100:
+            notes.append(f"Weights summed to {total:g}; rescaled to 100%.")
+        allocation = {k: v * scale for k, v in allocation.items()}
+    return allocation, notes
+
+
+def pct(x: float, signed: bool = False) -> str:
+    return f"{x * 100:+.1f}%" if signed else f"{x * 100:.1f}%"
+
+
+def triple(d: dict[str, float], fmt) -> str:
+    return " / ".join(fmt(d[h]) for h in an.HORIZONS)
+
+
+def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
+    tickers = sorted({t for key in allocation for t in universe[key]["tickers"]} | {RISK_FREE_TICKER})
+    histories, errors = fetch_all(tickers, use_cache=not args.no_cache)
+    risk_free = {}
+    if RISK_FREE_TICKER in histories:
+        prices = histories[RISK_FREE_TICKER].prices
+        risk_free = {h: an.total_return(prices, d) for h, d in an.HORIZONS.items()}
+
+    horizon_weights = dict(zip(an.HORIZONS, args.horizon_weights))
+    ranked: dict[str, list[an.Metrics]] = {}
+    skipped: dict[str, str] = dict(errors)
+    for key in allocation:
+        metrics = []
+        for t in universe[key]["tickers"]:
+            if t not in histories:
+                continue
+            m = an.compute_metrics(histories[t], key, risk_free)
+            if m:
+                metrics.append(m)
+            else:
+                skipped[t] = "less than 12 months of history"
+        if not metrics:
+            raise SystemExit(f"No usable price data for category '{key}'.")
+        ranked[key] = an.score_category(metrics, horizon_weights, args.risk_weight)
+
+    portfolios = {}
+    builders = {
+        "Best-in-class": "Top-scoring ETF in each category gets the full category weight.",
+        "Diversified": f"Top {args.picks} per category, skipping near-duplicates (daily-return correlation "
+        f">= {args.max_corr}); inverse-volatility weights within each category.",
+        "Low-volatility": "The 2 lowest-volatility ETFs from the top half of each category; inverse-volatility weights.",
+        "Category average (baseline)": "Every ETF in each category equally weighted - what the picks must beat.",
+    }
+    for name, description in builders.items():
+        weights: dict[str, float] = {}
+        for key, share in allocation.items():
+            share /= 100
+            peers = ranked[key]
+            if name == "Best-in-class":
+                part = {peers[0].ticker: share}
+            elif name == "Diversified":
+                part = an.inverse_vol_weights(an.pick_decorrelated(peers, histories, args.picks, args.max_corr), share)
+            elif name == "Low-volatility":
+                part = an.inverse_vol_weights(an.pick_low_vol(peers, 2), share)
+            else:
+                part = {m.ticker: share / len(peers) for m in peers}
+            for t, w in part.items():
+                weights[t] = weights.get(t, 0.0) + w
+        portfolios[name] = {
+            "description": description,
+            "weights": weights,
+            "stats": an.portfolio_stats(weights, histories, risk_free),
+        }
+
+    as_of = max(histories[t].dates[-1] for t in histories)
+    return {
+        "as_of": as_of,
+        "allocation": allocation,
+        "risk_free_returns": risk_free,
+        "ranked": ranked,
+        "portfolios": portfolios,
+        "skipped": skipped,
+        "names": {t: h.name for t, h in histories.items()},
+        "category_of": {t: key for key, ms in ranked.items() for t in (m.ticker for m in ms)},
+    }
+
+
+def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str:
+    out = [f"# ETF portfolio suggestions (prices as of {report['as_of']})", ""]
+    out += [f"> {n}" for n in notes]
+    out.append(
+        "Target mix: " + ", ".join(f"{v:g}% {universe[k]['name']}" for k, v in report["allocation"].items())
+    )
+    w = args.horizon_weights
+    out += [
+        "",
+        f"Scoring: each ETF is ranked against its category peers on 1m/3m/12m performance "
+        f"(horizon weights {w[0]:g}/{w[1]:g}/{w[2]:g}); {args.risk_weight:.0%} of each rank is reward/risk "
+        f"(return above T-bills ÷ volatility) and {1 - args.risk_weight:.0%} is raw return. Score 1.00 = best in category.",
+        "",
+        "## Sample portfolios",
+        "",
+        "| Portfolio | 1m | 3m | 12m | Vol (12m) | Reward/risk (12m) | Max drawdown (12m) |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for name, p in report["portfolios"].items():
+        s = p["stats"]
+        out.append(
+            f"| {name} | {pct(s['returns']['1m'], True)} | {pct(s['returns']['3m'], True)} | "
+            f"{pct(s['returns']['12m'], True)} | {pct(s['vol_12m'])} | {s['reward_risk_12m']:.2f} | "
+            f"{pct(s['max_drawdown_12m'])} |"
+        )
+    for name, p in report["portfolios"].items():
+        if name.startswith("Category average"):
+            continue
+        out += ["", f"### {name}", "", p["description"], "", "| Weight | Ticker | Category | Fund |", "|---:|---|---|---|"]
+        for t, wt in sorted(p["weights"].items(), key=lambda kv: -kv[1]):
+            out.append(f"| {pct(wt)} | {t} | {universe[report['category_of'][t]]['name']} | {report['names'][t]} |")
+
+    out += ["", "## Category rankings", ""]
+    for key, metrics in report["ranked"].items():
+        out += [
+            f"### {universe[key]['name']} — {report['allocation'][key]:g}% ({len(metrics)} ETFs ranked)",
+            "",
+            "| # | Ticker | Score | Return 1m / 3m / 12m | vs peer median 1m / 3m / 12m | Reward/risk 1m / 3m / 12m | Vol (12m) | Max DD | Fund |",
+            "|---:|---|---:|---|---|---|---:|---:|---|",
+        ]
+        for i, m in enumerate(metrics[: args.top], 1):
+            out.append(
+                f"| {i} | {m.ticker} | {m.score:.2f} | {triple(m.returns, lambda x: pct(x, True))} | "
+                f"{triple(m.relative, lambda x: pct(x, True))} | {triple(m.reward_risk, lambda x: f'{x:.2f}')} | "
+                f"{pct(m.vols['12m'])} | {pct(m.max_drawdown)} | {m.name} |"
+            )
+        out.append("")
+
+    if report["skipped"]:
+        out.append("Skipped: " + "; ".join(f"{t} ({why})" for t, why in sorted(report["skipped"].items())))
+        out.append("")
+    out.append(
+        "_Backtests use the same 12-month window the ETFs were selected on, so they overstate what the picks "
+        "will do next. Past performance does not predict future returns; this is not investment advice._"
+    )
+    return "\n".join(out)
+
+
+def to_json(report: dict) -> str:
+    def metrics_dict(m: an.Metrics) -> dict:
+        return {k: getattr(m, k) for k in ("ticker", "name", "score", "returns", "relative", "reward_risk", "vols", "max_drawdown")}
+
+    payload = {**report, "ranked": {k: [metrics_dict(m) for m in ms] for k, ms in report["ranked"].items()}}
+    del payload["category_of"]
+    return json.dumps(payload, indent=2)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="etf-agent",
+        description="Suggest ETF portfolios for a target sector mix by ranking ETFs on 1/3/12-month "
+        "peer-relative performance and reward/risk.",
+        epilog=f'Example: etf-agent "{EXAMPLE}"',
+    )
+    parser.add_argument("allocation", nargs="*", help="Target mix, e.g. \"40%% short term fixed income, 60%% growth\"")
+    parser.add_argument("--list-categories", action="store_true", help="Show categories, aliases, and ETFs, then exit")
+    parser.add_argument("--top", type=int, default=5, help="Ranked ETFs to show per category (default 5)")
+    parser.add_argument("--picks", type=int, default=3, help="ETFs per category in the Diversified portfolio (default 3)")
+    parser.add_argument("--max-corr", type=float, default=0.95, help="Correlation at which two ETFs count as duplicates (default 0.95)")
+    parser.add_argument("--risk-weight", type=float, default=0.5, help="0 = rank on raw return only, 1 = reward/risk only (default 0.5)")
+    parser.add_argument(
+        "--horizon-weights",
+        type=lambda s: [float(x) for x in s.split(",")],
+        default=[0.2, 0.3, 0.5],
+        help="Weights for 1m,3m,12m (default 0.2,0.3,0.5)",
+    )
+    parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
+    parser.add_argument("--no-cache", action="store_true", help="Re-download prices even if cached today")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of Markdown")
+    args = parser.parse_args(argv)
+
+    universe = json.loads(args.universe.read_text())
+    if args.list_categories:
+        for key, spec in universe.items():
+            print(f"{key}: {spec['name']}\n  aliases: {', '.join(spec['aliases'])}\n  ETFs: {' '.join(spec['tickers'])}")
+        return
+    if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:
+        parser.error("--horizon-weights needs 3 numbers and --risk-weight must be between 0 and 1")
+
+    try:
+        allocation, notes = parse_allocation(" ".join(args.allocation) or EXAMPLE, universe)
+    except ValueError as exc:
+        parser.error(str(exc))
+    report = build_report(allocation, universe, args)
+    print(to_json(report) if args.json else render_markdown(report, universe, args, notes))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
