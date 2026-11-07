@@ -8,7 +8,7 @@ python3 -m etf_agent "40% short term fixed income, 10% senior AAA rated fixed in
 
 No dependencies beyond Python 3.10+. Optionally `pip install -e .` to get an `etf-agent` command.
 
-For a slide-style overview of the approach, options, usage, and caveats, open [`docs/overview.html`](docs/overview.html) in a browser (arrow keys move between slides; Print saves a PDF, one slide per page).
+For a slide-style overview of the approach, options, usage, and caveats, open [`docs/overview.html`](docs/overview.html) in a browser (arrow keys move between slides; Print saves a PDF, one slide per page). The same deck is in PowerPoint form, with editable text and tables, as [`docs/overview.pptx`](docs/overview.pptx).
 
 **Price data.** Daily dividend-adjusted closes come from Yahoo Finance's public chart endpoint and are cached in `.cache/prices/` for the day. Yahoo has no official API, published limits, or guarantees, and it throttles heavy or cloud traffic. If a download fails and the `TIINGO_API_KEY` environment variable is set, the tool falls back to [Tiingo](https://www.tiingo.com)'s official end-of-day API for that ticker. Tiingo's free plan (sign up for a key) allows 50 requests an hour, 1,000 a day, and 500 different tickers a month, and covers ETFs and mutual funds. Google Finance has no API and MSN's is undocumented, so neither is used.
 
