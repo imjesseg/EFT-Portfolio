@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import math
 import os
@@ -9,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from etf_agent import analytics as an
-from etf_agent import data
+from etf_agent import cli, data
 from etf_agent import monitor, notify
 from etf_agent.cli import DEFAULT_UNIVERSE, parse_allocation
 from etf_agent.data import History
@@ -320,6 +322,98 @@ class EmailTest(unittest.TestCase):
         self.assertIn("<strong>Rebalance suggested.</strong>", html)
         self.assertIn('text-align:right;">&lt;$5</td>', html)
         self.assertIn('<a href="https://x.test/?a=1&amp;b=2">XLP</a>', html)
+
+
+def fake_returns(ticker: str, days: int = 400) -> list[float]:
+    """Deterministic made-up daily returns, different for every ticker."""
+    rng = random.Random(ticker)
+    drift, vol = rng.uniform(-0.0005, 0.001), rng.uniform(0.002, 0.02)
+    return [rng.gauss(drift, vol) for _ in range(days)]
+
+
+def fake_fetch_all(tickers, use_cache=True):
+    clones = {"FDFAX": "XLP"}  # this Fidelity fund closely tracks XLP, like the real pair
+    histories = {}
+    for t in tickers:
+        returns = fake_returns(t)
+        if t in clones:
+            noise = random.Random(t + "-noise")
+            returns = [r + noise.gauss(0, 0.001) for r in fake_returns(clones[t])]
+        histories[t] = history(t, returns)
+    return histories, {}
+
+
+class EndToEndCliTest(unittest.TestCase):
+    """Runs the command line on made-up prices, so every option is exercised without the network."""
+
+    MIX = "40% short term fixed income, 10% senior AAA, 10% commodities, 20% growth, 20% defensive"
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(cli, "fetch_all", fake_fetch_all), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            cli.main(list(argv))
+        return out.getvalue(), err.getvalue()
+
+    def test_portfolios_honor_the_mix_under_every_measure(self):
+        category_of = {t: key for key, spec in UNIVERSE.items() for t in spec["tickers"]}
+        for measure in ("sharpe", "sortino", "calmar"):
+            with self.subTest(measure=measure):
+                fidelity = ["--fidelity"] if measure == "sortino" else []  # matching is slow; one measure covers it
+                report = json.loads(self.run_cli("--json", "--measure", measure, *fidelity, self.MIX)[0])
+                allocation = report["allocation"]
+                self.assertEqual(allocation, {"short_term_fixed_income": 40, "aaa_fixed_income": 10, "commodities": 10,
+                                              "growth_equity": 20, "defensive_equity": 20})
+                for name, portfolio in report["portfolios"].items():
+                    by_category = {}
+                    for ticker, weight in portfolio["weights"].items():
+                        by_category[category_of[ticker]] = by_category.get(category_of[ticker], 0) + weight
+                    for category, pct in allocation.items():
+                        self.assertAlmostEqual(by_category[category], pct / 100, msg=f"{name} / {category}")
+                best = report["portfolios"]["Best-in-class"]["weights"]
+                self.assertEqual(set(best), {ranked[0]["ticker"] for ranked in report["ranked"].values()})
+                diversified = report["portfolios"]["Diversified"]["weights"]
+                for category in allocation:
+                    self.assertLessEqual(sum(category_of[t] == category for t in diversified), 3)
+                if fidelity:
+                    held = {t for name, p in report["portfolios"].items() if not name.startswith("Category") for t in p["weights"]}
+                    self.assertEqual(set(report["fidelity"]), held)
+                    self.assertTrue(all(match["funds"] for match in report["fidelity"].values()))
+
+    def test_markdown_report_and_fidelity_match(self):
+        markdown = self.run_cli("--fidelity", "--top", "2", self.MIX)[0]
+        for section in ("## Sample portfolios", "### Diversified", "## Fidelity mutual fund equivalents", "## Category rankings"):
+            self.assertIn(section, markdown)
+        match = json.loads(self.run_cli("--match", "XLP", "--json")[0])
+        self.assertEqual(match["XLP"]["funds"][0]["ticker"], "FDFAX")
+
+    def test_import_then_monitor_then_email_on_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            holdings, portfolio = Path(tmp) / "holdings.txt", Path(tmp) / "portfolio.json"
+            holdings.write_text("XLP 50\nQQQM 30\nFDFAX 20\nFDRXX 1000\n")
+            portfolio_text, notes = self.run_cli("--import-holdings", str(holdings))
+            doc = json.loads(portfolio_text)
+            doc["rules"]["replace_margin"] = 2  # scores top out at 1: isolate drift (laggards have their own test)
+            portfolio.write_text(monitor.portfolio_json(doc))
+            self.assertEqual(doc["cash"], 1000)  # the money market fund
+            self.assertEqual(next(h for h in doc["holdings"] if h["ticker"] == "FDFAX")["category"], "defensive_equity")
+            self.assertIn("FDFAX placed in defensive_equity", notes)
+
+            sent = []
+            with patch.object(cli.notify, "send_email", lambda subject, text: sent.append(subject)):
+                calm = json.loads(self.run_cli("--monitor", str(portfolio), "--json", "--email")[0])
+                self.assertFalse(calm["action_needed"])  # targets are today's weights
+                self.assertEqual(sent, [])  # --email stays quiet when nothing needs doing
+
+                doc["holdings"][0]["shares"] *= 2  # XLP doubles
+                portfolio.write_text(monitor.portfolio_json(doc))
+                drift = json.loads(self.run_cli("--monitor", str(portfolio), "--json", "--email")[0])
+            self.assertTrue(drift["action_needed"])
+            self.assertTrue(any(r.startswith("XLP") for r in drift["reasons"]))
+            bought = sum(t["amount"] for t in drift["trades"] if t["action"] == "buy")
+            sold = sum(t["amount"] for t in drift["trades"] if t["action"] == "sell")
+            self.assertAlmostEqual(sold - bought, drift["cash_after_trades"] - 1000, places=2)
+            self.assertEqual(len(sent), 1)
+            self.assertIn("Rebalance suggested", sent[0])
 
 
 if __name__ == "__main__":
