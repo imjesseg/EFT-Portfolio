@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ETF Portfolio Agent: overview</title>
+<style>
+  :root {
+    --ink: #1d2433; --muted: #5b6475; --faint: #8a93a3; --rule: #e3e6eb; --wash: #f6f7f9;
+    --accent: #2f6fdb; --accent-wash: #eaf1fd; --good: #1f8a4c; --warn: #b26a00; --bad: #c0392b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-snap-type: y mandatory; background: #e9ecf1; }
+  body { margin: 0; font: 16px/1.5 var(--sans); color: var(--ink); }
+  .slide {
+    scroll-snap-align: start; width: min(1100px, 100vw); aspect-ratio: 16 / 9; min-height: 560px;
+    margin: 24px auto; padding: 48px 64px 40px; background: #fff; border-radius: 10px;
+    box-shadow: 0 1px 3px rgb(0 0 0 / .08); display: flex; flex-direction: column; position: relative; overflow: hidden;
+  }
+  .slide::after { content: attr(data-n); position: absolute; right: 28px; bottom: 18px; font-size: 12px; color: var(--faint); }
+  h1 { font-size: 40px; line-height: 1.15; margin: 0 0 12px; font-weight: 600; letter-spacing: -.01em; }
+  h2 { font-size: 26px; margin: 0 0 6px; font-weight: 600; }
+  .lede { font-size: 17px; color: var(--muted); margin: 0 0 24px; max-width: 60em; }
+  h3 { font-size: 15px; margin: 0 0 6px; font-weight: 600; }
+  p, li { color: var(--ink); }
+  ul { margin: 0; padding-left: 20px; } li { margin: 4px 0; }
+  .muted { color: var(--muted); } .small { font-size: 13px; } .tiny { font-size: 12px; color: var(--faint); }
+  code, .mono { font-family: var(--mono); font-size: .88em; background: var(--wash); padding: 1px 5px; border-radius: 4px; }
+  pre { font-family: var(--mono); font-size: 13px; line-height: 1.55; background: #f3f5f8; border: 1px solid var(--rule); border-radius: 8px; padding: 12px 14px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .grid { display: grid; gap: 20px; flex: 1; min-height: 0; }
+  .g2 { grid-template-columns: 1fr 1fr; } .g3 { grid-template-columns: repeat(3, 1fr); } .g4 { grid-template-columns: repeat(4, 1fr); }
+  .tile { border: 1px solid var(--rule); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+  .tile .icon { font-size: 22px; line-height: 1; margin-bottom: 8px; color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 8px 0 20px; flex-wrap: wrap; }
+  .step { flex: 1; min-width: 140px; border: 1px solid var(--rule); border-radius: 10px; padding: 12px 14px; background: #fff; }
+  .step b { display: block; font-size: 14px; margin-bottom: 4px; }
+  .step span { font-size: 13px; color: var(--muted); }
+  .arrow { align-self: center; color: var(--faint); padding: 0 8px; font-size: 20px; }
+  .tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--wash); color: var(--muted); margin-right: 4px; }
+  .tag.good { background: #e8f5ee; color: var(--good); } .tag.warn { background: #fff4e0; color: var(--warn); } .tag.bad { background: #fdecea; color: var(--bad); }
+  .callout { border-left: 3px solid var(--accent); background: var(--accent-wash); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14px; }
+  .title-slide { justify-content: center; }
+  .title-slide .kicker { color: var(--accent); font-weight: 600; font-size: 14px; margin-bottom: 14px; }
+  .foot { margin-top: auto; padding-top: 12px; }
+  .nav { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 6px; }
+  .nav button { font: 13px var(--sans); border: 1px solid var(--rule); background: #fff; border-radius: 6px; padding: 6px 10px; cursor: pointer; color: var(--ink); }
+  .nav button:hover { background: var(--wash); }
+  @media screen and (max-width: 820px) {
+    .slide { aspect-ratio: auto; padding: 28px 22px 36px; margin: 12px auto; border-radius: 0; }
+    .g2, .g3, .g4 { grid-template-columns: 1fr; } h1 { font-size: 30px; }
+  }
+  @media print {
+    @page { size: 1100px 619px; margin: 0; }
+    html { background: #fff; scroll-snap-type: none; }
+    .slide { width: 1100px; height: 619px; min-height: 0; aspect-ratio: auto; margin: 0; border-radius: 0; box-shadow: none; break-after: page; }
+    .nav { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<section class="slide title-slide" data-n="1">
+  <div class="kicker">EFT-Portfolio · overview</div>
+  <h1>ETF Portfolio Agent</h1>
+  <p class="lede">Turns a target asset mix into ranked ETF suggestions and sample portfolios, finds matching Fidelity mutual funds, and monitors a real portfolio for rebalancing, with email alerts.</p>
+  <div class="grid g4" style="flex:none">
+    <div class="tile"><div class="icon">◎</div><h3>Suggest</h3><span class="small muted">Best ETFs per category from 1, 3 and 12-month results</span></div>
+    <div class="tile"><div class="icon">⇄</div><h3>Match</h3><span class="small muted">Closest Fidelity mutual fund for any ETF</span></div>
+    <div class="tile"><div class="icon">◷</div><h3>Monitor</h3><span class="small muted">Drift and laggard checks with a trade list</span></div>
+    <div class="tile"><div class="icon">✉</div><h3>Alert</h3><span class="small muted">Email on action, run by hand or from cron</span></div>
+  </div>
+  <div class="foot tiny">github.com/imjesseg/EFT-Portfolio · Python 3.10+, no dependencies · November 2026 · Not investment advice</div>
+</section>
+
+<section class="slide" data-n="2">
+  <h2>How it works</h2>
+  <p class="lede">Every recommendation follows the same pipeline. Funds are only ever compared with peers in their own category.</p>
+  <div class="flow">
+    <div class="step"><b>1 · Your mix</b><span>"40% short term fixed income, 20% growth…" matched to 17 categories</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>2 · Prices</b><span>2 years of dividend-adjusted daily closes; Yahoo, with Tiingo as backup</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>3 · Metrics</b><span>1/3/12-month return, return vs category median, risk-adjusted ratio</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>4 · Rank</b><span>Percentile score within the category, 0 to 1</span></div>
+    <div class="arrow">→</div>
+    <div class="step"><b>5 · Build</b><span>Four sample portfolios, backtested against a category-average baseline</span></div>
+  </div>
+  <div class="grid g3" style="flex:none">
+    <div><h3>Universe</h3><p class="small muted">113 ETFs in 17 categories (short-term bonds, AAA CLOs, Treasuries, commodities, growth, defensive, dividend, international…) plus 104 retail Fidelity mutual funds. Editable JSON files.</p></div>
+    <div><h3>Risk-free rate</h3><p class="small muted">T-bills (BIL) over the same period. "Excess return" means return above BIL.</p></div>
+    <div><h3>Outputs</h3><p class="small muted">Markdown reports for reading, or <code>--json</code> for other tools. Prices are cached per day.</p></div>
+  </div>
+</section>
+
+<section class="slide" data-n="3">
+  <h2>Scoring</h2>
+  <p class="lede">For each horizon, an ETF earns a blend of two peer percentiles, then horizons are averaged.</p>
+  <div class="grid g2">
+    <div>
+      <pre>score = Σ horizon_weight × (
+          risk_weight       × rank(risk-adjusted ratio)
+        + (1 − risk_weight) × rank(return) )</pre>
+      <table style="margin-top:14px">
+        <tr><th>Setting</th><th>Default</th><th>Flag</th></tr>
+        <tr><td>Horizon weights 1m / 3m / 12m</td><td>0.2 / 0.3 / 0.5</td><td><code>--horizon-weights</code></td></tr>
+        <tr><td>Risk vs raw return</td><td>50 / 50</td><td><code>--risk-weight</code></td></tr>
+        <tr><td>Risk-adjusted ratio</td><td>Sharpe</td><td><code>--measure</code></td></tr>
+      </table>
+    </div>
+    <div>
+      <table>
+        <tr><th>Measure</th><th>Risk counted</th><th>Weights picks by</th></tr>
+        <tr><td><b>Sharpe</b> <span class="tag">default</span></td><td>All volatility</td><td>Inverse volatility</td></tr>
+        <tr><td><b>Sortino</b> <code>--sortino</code></td><td>Only days that trailed T-bills</td><td>12-month Sortino</td></tr>
+        <tr><td><b>Calmar</b> <code>--calmar</code></td><td>Worst peak-to-trough drop (floored at 0.1%)</td><td>12-month Calmar</td></tr>
+      </table>
+      <p class="small muted" style="margin-top:12px">The measure also breaks ties between equally good Fidelity matches. Under Sortino or Calmar, a pick with no return above T-bills gets 0% weight, which can concentrate a category in one fund.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-n="4">
+  <h2>Sample portfolios</h2>
+  <p class="lede">All four keep your category percentages; they differ in which ETFs fill each one and how much each gets.</p>
+  <table class="small">
+    <tr><th>Portfolio</th><th>Which ETFs</th><th>Weight within the category</th></tr>
+    <tr><td><b>Best-in-class</b></td><td>The top-scoring ETF</td><td>100%</td></tr>
+    <tr><td><b>Diversified</b></td><td>Top 3 by score, skipping near-duplicates (correlation ≥ 0.95, e.g. QQQ / QQQM)</td><td>Inverse volatility, or Sortino / Calmar</td></tr>
+    <tr><td><b>Low-volatility</b></td><td>2 least volatile ETFs in the top half by score</td><td>Inverse volatility, or Sortino / Calmar</td></tr>
+    <tr><td><b>Category average</b></td><td>Every ETF in the category</td><td>Equal (the baseline to beat)</td></tr>
+  </table>
+  <div class="grid g2" style="margin-top:16px;flex:none;grid-template-columns:3fr 2fr">
+    <div>
+      <h3>Example: the 40/10/10/20/20 mix, Diversified portfolio</h3>
+      <table class="small">
+        <tr><th>Weighted by</th><th class="num">12m return</th><th class="num">Max drawdown</th><th class="num">Calmar</th></tr>
+        <tr><td>Inverse volatility</td><td class="num">+12.4%</td><td class="num">−1.9%</td><td class="num">4.83</td></tr>
+        <tr><td>Sortino</td><td class="num">+14.7%</td><td class="num">−2.1%</td><td class="num">5.52</td></tr>
+        <tr><td>Calmar</td><td class="num">+14.9%</td><td class="num">−2.1%</td><td class="num">5.76</td></tr>
+        <tr><td class="muted">Category average</td><td class="num muted">+8.2%</td><td class="num muted">−2.6%</td><td class="num muted">1.93</td></tr>
+      </table>
+      <p class="tiny">Prices to Nov 6, 2026. In-sample: picked and tested on the same 12 months.</p>
+    </div>
+    <div class="callout" style="align-self:start">Each portfolio is backtested over 12 months against the baseline. The backtest uses the same window the ETFs were chosen on, so it overstates what they will do next. Treat it as a sanity check, not a forecast.</div>
+  </div>
+</section>
+
+<section class="slide" data-n="5">
+  <h2>Fidelity mutual fund equivalents</h2>
+  <p class="lede">For any ETF, find the Fidelity mutual fund that has moved most like it over the last 12 months.</p>
+  <div class="grid g2">
+    <div>
+      <ul class="small">
+        <li><b>Tracking error</b> ranks candidates: the annualized volatility of the daily return difference. Unlike correlation, it penalizes a fund that moves the same way but twice as far.</li>
+        <li><b>Match rating:</b> <span class="tag good">close</span> tracking error ≤ 2% or correlation ≥ 0.95; <span class="tag warn">fair</span> ≤ 6% or ≥ 0.80; <span class="tag bad">loose</span> Fidelity has no real equivalent.</li>
+        <li>With <code>--sortino</code> or <code>--calmar</code>, the higher-ratio fund wins among equally good matches. A better performer never wins by being a worse match.</li>
+        <li>Money market funds are excluded: their fixed $1 price carries no tracking information.</li>
+      </ul>
+      <pre style="margin-top:12px">python3 -m etf_agent --match XLP VIG VNQ SCHD
+python3 -m etf_agent --fidelity "your mix"</pre>
+    </div>
+    <div>
+      <table class="small">
+        <tr><th>ETF</th><th>Fidelity fund</th><th>Match</th><th class="num">Tracking error</th></tr>
+        <tr><td>XLP</td><td>FDFAX Select Consumer Staples</td><td><span class="tag good">close</span></td><td class="num">3.8%</td></tr>
+        <tr><td>VNQ</td><td>FSRNX Real Estate Index</td><td><span class="tag good">close</span></td><td class="num">0.8%</td></tr>
+        <tr><td>QQQ</td><td>FNCMX Nasdaq Composite Index</td><td><span class="tag good">close</span></td><td class="num">4.9%</td></tr>
+        <tr><td>VIG</td><td>FEQIX Equity-Income</td><td><span class="tag warn">fair</span></td><td class="num">4.2%</td></tr>
+        <tr><td>SCHD</td><td>FVDFX Value Discovery</td><td><span class="tag bad">loose</span></td><td class="num">7.6%</td></tr>
+        <tr><td>GLD</td><td>FSDPX Select Materials</td><td><span class="tag bad">loose</span></td><td class="num">23%</td></tr>
+      </table>
+      <p class="tiny" style="margin-top:8px">Prices to Nov 6, 2026. With <code>--sortino</code>, VNQ → FRESX and VIG → FLCOX instead.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-n="6">
+  <h2>Daily portfolio monitor</h2>
+  <p class="lede">Describe what you own in <code>portfolio.json</code>; the monitor checks it and proposes trades only when a rule fires.</p>
+  <div class="grid g3" style="flex:none">
+    <div class="tile"><h3>Drift: the 5/25 rule</h3><p class="small muted">A holding more than 5 percentage points or more than 25% of its target away from target. A 10% target at 13% triggers (3 points is 30% of 10%).</p></div>
+    <div class="tile"><h3>Persistent laggard</h3><p class="small muted">Bottom half of its category at each of the last 4 weekly checks, and the best unheld ETF ahead by ≥ 0.25 every time. One bad week never triggers a swap.</p></div>
+    <div class="tile"><h3>Safety checks</h3><p class="small muted">Missing or stale prices (more than 4 days old) block every suggestion. Suggestions only: you place trades yourself.</p></div>
+  </div>
+  <div class="grid g2" style="margin-top:18px;flex:none">
+    <div>
+      <h3>Portfolio file</h3>
+      <pre>{ "account_type": "tax_deferred",
+  "cash": 100000, "cash_target": 21.2,
+  "holdings": [
+    {"ticker": "FDFAX", "shares": 2084, "target": 45.08,
+     "category": "defensive_equity"},
+    {"ticker": "FBGRX", "shares": 602,  "target": 33.72,
+     "category": "growth_equity"} ] }</pre>
+    </div>
+    <ul class="small">
+      <li><b>Targets</b> plus <code>cash_target</code> add up to 100. Cash follows the same 5/25 rule; with no cash target, cash is invested once it passes 5%.</li>
+      <li><b>Account type:</b> <code>tax_deferred</code> (IRA, 401k) ignores taxes; <code>taxable</code> adds capital-gains and wash-sale warnings.</li>
+      <li><b>Import</b> from a Fidelity positions CSV or a <code>TICKER SHARES</code> list. Mutual funds are placed in the category of the ETF they track most closely; money market funds (<code>…XX</code>) count as cash.</li>
+      <li>All rule thresholds can be overridden in the file.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="slide" data-n="7">
+  <h2>Usage</h2>
+  <p class="lede">Everything runs from one command. Add <code>--json</code> to any of them for machine-readable output.</p>
+  <div class="grid g2">
+    <div>
+      <h3>Suggest and compare</h3>
+      <pre>python3 -m etf_agent "40% short term fixed income,
+  10% senior AAA, 10% commodities, 20% growth,
+  20% defensive"
+python3 -m etf_agent --sortino --fidelity \
+  "60% growth, 40% short term"
+python3 -m etf_agent --list-categories</pre>
+      <h3 style="margin-top:16px">Find Fidelity equivalents</h3>
+      <pre>python3 -m etf_agent --match XLP QQQ SGOV</pre>
+    </div>
+    <div>
+      <h3>Set up and monitor a portfolio</h3>
+      <pre>python3 -m etf_agent \
+  --import-holdings positions.csv \
+  "40% short term, 10% AAA, 10% commodities,
+   20% growth, 20% defensive" > portfolio.json
+python3 -m etf_agent --monitor portfolio.json --sortino
+
+# try the sample portfolio
+python3 -m etf_agent --monitor examples/three_funds.json</pre>
+      <h3 style="margin-top:16px">In Amp</h3>
+      <p class="small muted">Ask in plain English in this repo, for example "suggest a conservative 60/40 portfolio with Fidelity funds". The <code>suggesting-etf-portfolios</code> skill runs the tool and summarizes.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-n="8">
+  <h2>Options</h2>
+  <div class="grid g2">
+    <table class="small">
+      <tr><th>Flag</th><th>What it does</th></tr>
+      <tr><td><code>--measure</code> / <code>--sortino</code> / <code>--calmar</code></td><td>Risk measure for ranking, weights and Fidelity tie-breaks</td></tr>
+      <tr><td><code>--risk-weight 0..1</code></td><td>Share of each rank from the risk measure (default 0.5)</td></tr>
+      <tr><td><code>--horizon-weights a,b,c</code></td><td>Weights for 1m, 3m, 12m (default 0.2,0.3,0.5)</td></tr>
+      <tr><td><code>--picks N</code></td><td>ETFs per category in Diversified (default 3)</td></tr>
+      <tr><td><code>--max-corr x</code></td><td>Correlation that counts as a duplicate (default 0.95)</td></tr>
+      <tr><td><code>--top N</code></td><td>Rows per ranking table (default 5)</td></tr>
+      <tr><td><code>--universe file</code></td><td>Use your own category / ETF list</td></tr>
+    </table>
+    <table class="small">
+      <tr><th>Flag</th><th>What it does</th></tr>
+      <tr><td><code>--fidelity</code></td><td>Fidelity equivalent for every suggested ETF</td></tr>
+      <tr><td><code>--match ETF…</code></td><td>Fidelity equivalents for specific ETFs only</td></tr>
+      <tr><td><code>--import-holdings FILE</code></td><td>Build a portfolio file from positions</td></tr>
+      <tr><td><code>--account</code> / <code>--account-type</code></td><td>Pick an account from the export; tax treatment</td></tr>
+      <tr><td><code>--monitor [FILE]</code></td><td>Check a portfolio and propose trades</td></tr>
+      <tr><td><code>--email [action|always]</code></td><td>Email the monitor report: only when action is needed (default) or every run</td></tr>
+      <tr><td><code>--no-cache</code> / <code>--json</code></td><td>Force fresh prices; machine-readable output</td></tr>
+    </table>
+  </div>
+</section>
+
+<section class="slide" data-n="9">
+  <h2>Setup notes</h2>
+  <div class="grid g2">
+    <div>
+      <h3>Email and cron (any Linux machine with Python 3.10+)</h3>
+      <pre># ~/.etf-agent.env  (chmod 600)
+export SMTP_HOST=smtp.gmail.com SMTP_PORT=587
+export SMTP_USER=you@gmail.com
+export SMTP_PASSWORD='your-app-password'
+export EMAIL_TO=you@gmail.com
+export TIINGO_API_KEY=...   # optional backup data
+
+# crontab -e: weekdays at 9 p.m., after fund prices post
+0 21 * * 1-5 . $HOME/.etf-agent.env &&
+  cd $HOME/EFT-Portfolio && python3 -m etf_agent
+  --monitor portfolio.json --sortino --email</pre>
+      <p class="small muted" style="margin-top:8px">The cron entry is one line in practice (wrapped here). Gmail needs an app password (2-Step Verification on). Cron uses the machine's time zone.</p>
+    </div>
+    <div>
+      <h3>Data sources</h3>
+      <ul class="small">
+        <li><b>Yahoo Finance</b> (primary): free, unofficial, no published limits; may throttle cloud servers.</li>
+        <li><b>Tiingo</b> (backup, when <code>TIINGO_API_KEY</code> is set): official API with ETF and mutual fund prices; free plan 50 requests/hour, 1,000/day, 500 tickers/month.</li>
+        <li><b>Not usable:</b> Google Finance (no API; Sheets can't export history or mutual funds), Microsoft (MSN undocumented, Bing APIs retired Aug 2025), Fidelity (no public retail API).</li>
+      </ul>
+      <h3 style="margin-top:14px">Privacy</h3>
+      <p class="small muted"><code>portfolio.json</code> is git-ignored. Never commit it, even once: git keeps tracking a committed file, and the GitHub repo is public. Samples live in <code>examples/</code>.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-n="10">
+  <h2>Caveats</h2>
+  <div class="grid g2">
+    <ul class="small">
+      <li><b>Past performance:</b> rankings use the last 1, 3 and 12 months; backtests are in-sample. Neither predicts future returns.</li>
+      <li><b>Concentration:</b> Sortino and Calmar weighting can put most or all of a category in one fund. Calmar's drawdown floor limits but doesn't remove this for near-cash funds.</li>
+      <li><b>Data:</b> Yahoo is unofficial and can change or block without notice. A bad data day produces "no action", never a trade.</li>
+      <li><b>Replacements</b> come from the category's ETF list; a 401(k) menu may not offer them. Use <code>--match</code> for a Fidelity equivalent.</li>
+    </ul>
+    <ul class="small">
+      <li><b>Taxes:</b> taxable accounts get warnings only; lot-level cost basis isn't tracked.</li>
+      <li><b>Not yet tested live:</b> Tiingo (no key), real SMTP delivery (tested with a simulated mail server), a real Fidelity CSV export (format written from documentation and memory), Fidelity research links (fidelity.com blocks automated checks).</li>
+      <li><b>Hand-picked lists:</b> the ETF and Fidelity fund lists are curated, not exhaustive; edit the JSON files to change them.</li>
+      <li><b>Suggestions only.</b> It never places trades. Not investment advice.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="slide" data-n="11">
+  <h2>Quality and delivery</h2>
+  <div class="grid g3" style="flex:none">
+    <div class="tile"><h3>24 automated tests</h3><p class="small muted">Math checked against hand-calculated values; end-to-end runs of the command line on made-up prices, covering portfolios under every measure, Fidelity matching, import, monitor and email.</p></div>
+    <div class="tile"><h3>Continuous integration</h3><p class="small muted">GitHub Actions runs the tests on Python 3.10 and 3.13 for every push and pull request. Tests need no network.</p></div>
+    <div class="tile"><h3>Where it lives</h3><p class="small muted">GitHub <code>imjesseg/EFT-Portfolio</code> and the Amp-hosted <code>portfolio-manager</code> repo, kept in sync. Runs on 32-bit ARM too: plain Python only.</p></div>
+  </div>
+  <h3 style="margin-top:22px">Project layout</h3>
+  <table class="small">
+    <tr><td><code>etf_agent/analytics.py</code></td><td>Metrics, scoring, weights, Fidelity matching, backtests</td></tr>
+    <tr><td><code>etf_agent/monitor.py</code></td><td>Portfolio files, holdings import, drift and laggard rules, reports</td></tr>
+    <tr><td><code>etf_agent/cli.py</code></td><td>Command-line options and the suggestion report</td></tr>
+    <tr><td><code>etf_agent/data.py</code> · <code>notify.py</code></td><td>Price downloads with cache and Tiingo fallback · email</td></tr>
+    <tr><td><code>etf_agent/universe.json</code> · <code>fidelity_funds.json</code></td><td>Category → ETF lists · Fidelity fund candidates</td></tr>
+  </table>
+</section>
+
+<div class="nav"><button id="prev" aria-label="Previous slide">↑ Prev</button><button id="next" aria-label="Next slide">Next ↓</button><button id="print">Print / PDF</button></div>
+<script>
+{
+  const slides = [...document.querySelectorAll('.slide')];
+  const current = () => slides.reduce((best, s, i) => Math.abs(s.getBoundingClientRect().top) < Math.abs(slides[best].getBoundingClientRect().top) ? i : best, 0);
+  let idx = 0, timer;
+  addEventListener('scroll', () => { clearTimeout(timer); timer = setTimeout(() => { idx = current(); }, 150); });
+  const go = (d) => { clearTimeout(timer); idx = Math.max(0, Math.min(slides.length - 1, idx + d)); slides[idx].scrollIntoView({ behavior: 'smooth' }); };
+  document.getElementById('prev').onclick = () => go(-1);
+  document.getElementById('next').onclick = () => go(1);
+  document.getElementById('print').onclick = () => window.print();
+  document.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'ArrowDown', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); go(1); }
+    if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key)) { e.preventDefault(); go(-1); }
+  });
+}
+</script>
+</body>
+</html>
