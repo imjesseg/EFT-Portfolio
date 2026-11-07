@@ -1,0 +1,17 @@
+{
+  "account_type": "tax_deferred",
+  "cash": 0,
+  "holdings": [
+    {"ticker": "USFR", "shares": 400.45, "target": 20},
+    {"ticker": "MINT", "shares": 99.75, "target": 10},
+    {"ticker": "FCNVX", "shares": 998.4, "target": 10, "category": "short_term_fixed_income"},
+    {"ticker": "PAAA", "shares": 196.96, "target": 10},
+    {"ticker": "COMT", "shares": 148.85, "target": 5},
+    {"ticker": "FTGC", "shares": 169.81, "target": 5},
+    {"ticker": "QQQM", "shares": 33.72, "target": 10},
+    {"ticker": "FSPGX", "shares": 205.47, "target": 10, "category": "growth_equity"},
+    {"ticker": "XLV", "shares": 59.6, "target": 10},
+    {"ticker": "FDFAX", "shares": 106.82, "target": 10, "category": "defensive_equity"}
+  ],
+  "rules": {"drift_points": 5, "drift_relative": 0.25, "laggard_weeks": 4, "replace_margin": 0.25, "stale_days": 4}
+}

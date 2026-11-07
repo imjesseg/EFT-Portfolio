@@ -10,6 +10,7 @@ from .data import History
 
 TRADING_DAYS = 252
 HORIZONS = {"1m": 21, "3m": 63, "12m": 252}
+RISK_FREE_TICKER = "BIL"  # 1-3 month T-bills
 
 
 @dataclass

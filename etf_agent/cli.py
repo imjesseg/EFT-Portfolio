@@ -10,10 +10,10 @@ from functools import partial
 from pathlib import Path
 
 from . import analytics as an
+from . import monitor, notify
 from .data import fetch_all
 
 DEFAULT_UNIVERSE = Path(__file__).with_name("universe.json")
-RISK_FREE_TICKER = "BIL"  # 1-3 month T-bills
 FIDELITY_FUNDS = Path(__file__).with_name("fidelity_funds.json")
 FIDELITY_QUOTE_URL = "https://digital.fidelity.com/prgw/digital/research/quote/dashboard/summary?symbol={}"
 # --measure choice -> (Metrics attribute, description). Volatility-based "sharpe" is the default.
@@ -86,10 +86,10 @@ def fidelity_matches(
     Returns (matches, fetch errors). ``prefer`` ("sortino"/"calmar") breaks ties among equally good matches.
     """
     funds = [t for group in json.loads(FIDELITY_FUNDS.read_text()).values() for t in group]
-    wanted = dict.fromkeys(etfs + funds + [RISK_FREE_TICKER])
+    wanted = dict.fromkeys(etfs + funds + [an.RISK_FREE_TICKER])
     fetched, errors = fetch_all([t for t in wanted if t not in histories], use_cache)
     histories = {**histories, **fetched}
-    rf = an.total_return(histories[RISK_FREE_TICKER].prices, an.TRADING_DAYS) if RISK_FREE_TICKER in histories else 0.0
+    rf = an.total_return(histories[an.RISK_FREE_TICKER].prices, an.TRADING_DAYS) if an.RISK_FREE_TICKER in histories else 0.0
     matches = {
         e: {
             **an.measures_12m(histories[e].prices, rf),
@@ -146,11 +146,11 @@ def render_fidelity_table(matches: dict[str, dict], prefer: str | None) -> list[
 
 
 def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
-    tickers = sorted({t for key in allocation for t in universe[key]["tickers"]} | {RISK_FREE_TICKER})
+    tickers = sorted({t for key in allocation for t in universe[key]["tickers"]} | {an.RISK_FREE_TICKER})
     histories, errors = fetch_all(tickers, use_cache=not args.no_cache)
     risk_free = {}
-    if RISK_FREE_TICKER in histories:
-        prices = histories[RISK_FREE_TICKER].prices
+    if an.RISK_FREE_TICKER in histories:
+        prices = histories[an.RISK_FREE_TICKER].prices
         risk_free = {h: an.total_return(prices, d) for h, d in an.HORIZONS.items()}
 
     horizon_weights = dict(zip(an.HORIZONS, args.horizon_weights))
@@ -335,6 +335,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--calmar", dest="measure", action="store_const", const="calmar", help="Same as --measure calmar")
     parser.add_argument("--fidelity", action="store_true", help="Add the closest Fidelity mutual fund for every suggested ETF")
     parser.add_argument("--match", nargs="+", metavar="ETF", help="Only find the closest Fidelity mutual funds for these ETFs, e.g. --match XLP QQQ")
+    parser.add_argument(
+        "--monitor",
+        nargs="?",
+        const=Path("portfolio.json"),
+        type=Path,
+        metavar="PORTFOLIO",
+        help="Check a portfolio file (default portfolio.json) for drift and laggards and propose trades",
+    )
+    parser.add_argument(
+        "--email",
+        nargs="?",
+        const="always",
+        choices=["always", "action"],
+        help="With --monitor, email the report (SMTP settings from environment variables): every run (default), "
+        "or 'action' only when a rebalance is suggested or prices are missing",
+    )
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
     parser.add_argument("--no-cache", action="store_true", help="Re-download prices even if cached today")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of Markdown")
@@ -357,6 +373,21 @@ def main(argv: list[str] | None = None) -> None:
         return
     if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:
         parser.error("--horizon-weights needs 3 numbers and --risk-weight must be between 0 and 1")
+    if args.monitor:
+        try:
+            portfolio = monitor.load_portfolio(args.monitor, universe)
+        except (OSError, ValueError, KeyError) as exc:
+            parser.error(f"{args.monitor}: {exc}")
+        histories, _ = fetch_all(monitor.tickers_needed(portfolio, universe), use_cache=not args.no_cache)
+        report = monitor.check(
+            portfolio, universe, histories, dict(zip(an.HORIZONS, args.horizon_weights)), args.risk_weight,
+            MEASURES[args.measure][0],
+        )
+        text = monitor.render(report)
+        print(json.dumps(report, indent=2) if args.json else text)
+        if args.email == "always" or (args.email == "action" and (report["action_needed"] or report["data_problems"])):
+            notify.send_email(f"ETF portfolio check {report['as_of']}: {monitor.headline(report)}", text)
+        return
 
     try:
         allocation, notes = parse_allocation(" ".join(args.allocation) or EXAMPLE, universe)

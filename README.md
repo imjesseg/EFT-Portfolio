@@ -6,7 +6,9 @@ Give it a target asset mix; it ranks ETFs in each category on 1, 3, and 12-month
 python3 -m etf_agent "40% short term fixed income, 10% senior AAA rated fixed income, 10% commodities, 20% growth equities, 20% defensive equities"
 ```
 
-No dependencies beyond Python 3.10+. Prices are daily adjusted closes from Yahoo Finance's public chart endpoint, cached in `.cache/prices/` for the day. Optionally `pip install -e .` to get an `etf-agent` command.
+No dependencies beyond Python 3.10+. Optionally `pip install -e .` to get an `etf-agent` command.
+
+**Price data.** Daily dividend-adjusted closes come from Yahoo Finance's public chart endpoint and are cached in `.cache/prices/` for the day. Yahoo has no official API, published limits, or guarantees, and it throttles heavy or cloud traffic. If a download fails and the `TIINGO_API_KEY` environment variable is set, the tool falls back to [Tiingo](https://www.tiingo.com)'s official end-of-day API for that ticker. Tiingo's free plan (sign up for a key) allows 50 requests an hour, 1,000 a day, and 500 different tickers a month, and covers ETFs and mutual funds. Google Finance has no API and MSN's is undocumented, so neither is used.
 
 In Amp, just ask in this repo (for example "suggest ETFs for 60% growth, 40% short-term bonds, conservative") — the `suggesting-etf-portfolios` skill runs the agent and summarizes the result.
 
@@ -57,6 +59,48 @@ python3 -m etf_agent --match XLP QQQ SGOV
 Or add `--fidelity` to a portfolio run to get a Fidelity equivalent for every suggested ETF. Funds are ranked by **tracking error** (annualized volatility of the daily return difference over the last 12 months), which also penalizes funds that move in the same direction but by more or less than the ETF. Each match shows correlation, beta, the 12-month return gap, the 12-month Sortino (or Calmar with `--calmar`) of the ETF and the fund, and a close / fair / loose label; "loose" means Fidelity has no mutual fund with that exposure (e.g. gold bullion or commodity futures). Fund tickers link to their Fidelity research page.
 
 The candidate list of ~100 retail Fidelity mutual funds (Select sector, index, active equity, allocation, and bond funds) lives in [`etf_agent/fidelity_funds.json`](etf_agent/fidelity_funds.json). Money market funds are excluded because their constant $1 price carries no tracking information.
+
+## Daily portfolio monitor
+
+Describe what you own in a portfolio file, then check it:
+
+```bash
+cp portfolio.example.json portfolio.json   # edit tickers, shares, and target %
+python3 -m etf_agent --monitor portfolio.json --sortino
+```
+
+Each holding has a `ticker`, `shares`, and `target` (percent; targets must add up to 100). Holdings outside the ETF lists, such as Fidelity mutual funds, need a `category`. `cash` is counted in the total and fully deployed by proposed trades. `portfolio.json` is git-ignored so your holdings stay private.
+
+The check suggests a rebalance when either rule fires:
+
+- **Drift** (5/25 rule): a holding's weight is more than `drift_points` (5) percentage points or more than `drift_relative` (25%) of its target away from its target.
+- **Persistent laggard**: a holding ranked in the bottom half of its category at each of the last `laggard_weeks` (4) weekly checks, and the best ETF it doesn't hold beat its score by at least `replace_margin` (0.25) at every one of them. One bad week never triggers a swap. Scores use the same ranking and `--measure` as the rest of the tool.
+
+When a rule fires, it proposes trades back to the targets (with any replacement taking over the laggard's target), in dollars and approximate shares. If any holding's price is missing or more than `stale_days` (4) days old, it suggests nothing. Rules can be overridden in the file's `rules` object. `--json` prints a machine-readable report whose `action_needed` field says whether to act.
+
+Set `"account_type": "tax_deferred"` for IRAs and 401(k)s, where taxes don't apply. `"taxable"` adds capital-gains and wash-sale warnings to proposed sales. Lot-level cost basis isn't tracked yet. Replacement candidates come from the category's ETF list; check that your plan offers them, or use `--match` for a Fidelity mutual fund equivalent.
+
+### Email and scheduling
+
+Add `--email` to send the report by email after each check, or `--email action` to send only when a rebalance is suggested or prices are missing. Mail goes through any SMTP server, configured with environment variables. For Gmail, use an [app password](https://myaccount.google.com/apppasswords), which needs 2-Step Verification:
+
+```bash
+# ~/.etf-agent.env  (chmod 600 — it holds a password)
+export SMTP_HOST=smtp.gmail.com
+export SMTP_PORT=587            # 465 for SSL-only servers
+export SMTP_USER=you@gmail.com
+export SMTP_PASSWORD='your-app-password'
+export EMAIL_TO=you@gmail.com   # comma-separate several addresses
+export TIINGO_API_KEY=...       # optional backup price source
+```
+
+Then schedule it with `crontab -e`, for example at 9 p.m. on weekdays, after mutual fund prices are published:
+
+```cron
+0 21 * * 1-5  . $HOME/.etf-agent.env && cd $HOME/EFT-Portfolio && python3 -m etf_agent --monitor portfolio.json --sortino --email >> $HOME/etf-monitor.log 2>&1
+```
+
+Cron uses the machine's time zone, so adjust the hour if it isn't Eastern.
 
 ## Categories
 

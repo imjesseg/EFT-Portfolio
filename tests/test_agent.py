@@ -1,10 +1,16 @@
 import json
 import math
+import os
 import random
+import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
+from unittest.mock import patch
 
 from etf_agent import analytics as an
+from etf_agent import data
+from etf_agent import monitor, notify
 from etf_agent.cli import DEFAULT_UNIVERSE, parse_allocation
 from etf_agent.data import History
 
@@ -144,6 +150,114 @@ class PortfolioTest(unittest.TestCase):
         self.assertAlmostEqual(stats["returns"]["12m"], 1.0005**252 - 1)
         self.assertAlmostEqual(stats["max_drawdown_12m"], 0.0)
         self.assertTrue(math.isclose(stats["vol_12m"], 0.0, abs_tol=1e-12))
+
+
+class MonitorTest(unittest.TestCase):
+    UNIVERSE = {"cat": {"name": "Category", "aliases": [], "tickers": ["A", "B", "C"]}}
+
+    def run_check(self, shares_a, shares_b, histories=None):
+        portfolio = monitor.Portfolio(
+            [monitor.Holding("A", shares_a, 0.10, "cat"), monitor.Holding("B", shares_b, 0.90, "cat")],
+            0.0, "tax_deferred", dict(monitor.DEFAULT_RULES),
+        )
+        flat = {t: history(t, [0.0] * 300) for t in ("A", "B", "C")}  # every price stays at 100
+        return monitor.check(portfolio, self.UNIVERSE, histories or flat, {"1m": 1, "3m": 1, "12m": 1}, 0.5, "reward_risk")
+
+    def test_drift_bands_use_points_or_share_of_target(self):
+        # A at 13% vs 10% is only 3 points off but 30% of its target: outside the 5/25 band.
+        report = self.run_check(13, 87)
+        self.assertTrue(report["action_needed"])
+        self.assertEqual([r["breached"] for r in report["holdings"]], [True, False])
+        trades = {t["ticker"]: (t["action"], round(t["amount"], 2)) for t in report["trades"]}
+        self.assertEqual(trades, {"A": ("sell", 300.0), "B": ("buy", 300.0)})
+        # 12% is 2 points and 20% of target: inside both limits.
+        self.assertFalse(self.run_check(12, 88)["action_needed"])
+
+    def test_stale_prices_block_action(self):
+        histories = {t: history(t, [0.0] * 300) for t in ("A", "C")}
+        histories["B"] = history("B", [0.0] * 290)  # ten days behind the others
+        report = self.run_check(13, 87, histories)
+        self.assertFalse(report["action_needed"])
+        self.assertEqual(report["trades"], [])
+        self.assertIn("B", report["data_problems"][0])
+
+    def test_replacement_needs_a_persistent_laggard(self):
+        rng = random.Random(4)
+        noisy = lambda drift, n=300: [drift + rng.gauss(0, 0.002) for _ in range(n)]  # noqa: E731
+        universe = {"cat": {"name": "Category", "aliases": [], "tickers": ["H", "G", "M1", "M2"]}}
+        peers = {"G": history("G", noisy(0.002)), "M1": history("M1", noisy(0.001)), "M2": history("M2", noisy(0.0005))}
+        rules = {**monitor.DEFAULT_RULES, "laggard_weeks": 3}
+
+        def check(held_returns):
+            portfolio = monitor.Portfolio([monitor.Holding("H", 100, 1.0, "cat")], 0.0, "tax_deferred", rules)
+            histories = {**peers, "H": history("H", held_returns)}
+            return monitor.check(portfolio, universe, histories, {"1m": 1, "3m": 1, "12m": 1}, 0.5, "reward_risk")
+
+        lagging = check(noisy(-0.001))
+        self.assertTrue(lagging["watch"][0]["replace"])
+        self.assertEqual({t["ticker"]: t["action"] for t in lagging["trades"]}, {"H": "sell", "G": "buy"})
+        # A fund that led its category until a bad final week is only watched, not replaced.
+        slump = check(noisy(0.003, 295) + [-0.05] * 5)
+        self.assertFalse(slump["watch"][0]["replace"])
+        self.assertFalse(slump["action_needed"])
+
+
+class DataFallbackTest(unittest.TestCase):
+    def test_tiingo_is_used_only_when_yahoo_fails_and_a_key_is_set(self):
+        rows = [{"date": "2026-11-05T00:00:00.000Z", "adjClose": 10.0}, {"date": "2026-11-06T00:00:00.000Z", "adjClose": 10.5}]
+
+        def fake_get(url):
+            if "yahoo" in url:
+                raise OSError("HTTP Error 429: Too Many Requests")
+            self.assertIn("token=KEY", url)
+            return rows
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(data, "_get_json", fake_get), patch.object(data, "CACHE_DIR", Path(tmp)):
+            with patch.dict(os.environ, {"TIINGO_API_KEY": ""}):
+                self.assertRaises(OSError, data.fetch_history, "XLP")
+            with patch.dict(os.environ, {"TIINGO_API_KEY": "KEY"}):
+                h = data.fetch_history("XLP")
+        self.assertEqual((h.source, h.dates, h.prices), ("tiingo", ["2026-11-05", "2026-11-06"], [10.0, 10.5]))
+
+
+class EmailTest(unittest.TestCase):
+    def test_report_is_sent_as_plain_text_and_html(self):
+        sent = []
+
+        class FakeSMTP:
+            def __init__(self, host, port, timeout):
+                self.address = (host, port)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def ehlo(self):
+                pass
+
+            def has_extn(self, name):
+                return False
+
+            def login(self, user, password):
+                sent.append(("login", user, password))
+
+            def send_message(self, message):
+                sent.append(message)
+
+        report = "# Check\n\n**Rebalance suggested.**\n\n| Ticker | Amount |\n|---|---:|\n| [XLP](https://x.test/?a=1&b=2) | <$5 |"
+        env = {"SMTP_HOST": "smtp.test", "SMTP_USER": "me@test", "SMTP_PASSWORD": "pw", "EMAIL_TO": "a@test, b@test"}
+        with patch.dict(os.environ, env), patch.object(notify.smtplib, "SMTP", FakeSMTP):
+            notify.send_email("ETF check: Rebalance suggested", report)
+        login, message = sent
+        self.assertEqual(login, ("login", "me@test", "pw"))
+        self.assertEqual((message["To"], message["From"]), ("a@test, b@test", "me@test"))
+        self.assertEqual(message.get_body(("plain",)).get_content().strip(), report)
+        html = message.get_body(("html",)).get_content()
+        self.assertIn("<strong>Rebalance suggested.</strong>", html)
+        self.assertIn('text-align:right;">&lt;$5</td>', html)
+        self.assertIn('<a href="https://x.test/?a=1&amp;b=2">XLP</a>', html)
 
 
 if __name__ == "__main__":
