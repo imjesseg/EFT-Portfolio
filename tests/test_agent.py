@@ -22,7 +22,7 @@ def history(ticker: str, daily_returns: list[float]) -> History:
 
 def metrics(ticker: str, ret: float, vol: float) -> an.Metrics:
     same = lambda x: {h: x for h in an.HORIZONS}
-    return an.Metrics(ticker, ticker, "x", same(ret), same(vol), same(ret / vol), same(ret / vol), 0.0)
+    return an.Metrics(ticker, ticker, "x", same(ret), same(vol), same(ret / vol), same(ret / vol), same(ret / vol), 0.0)
 
 
 class ParseAllocationTest(unittest.TestCase):
@@ -73,6 +73,12 @@ class ScoringTest(unittest.TestCase):
         expected = ((1.02 * 0.99) ** 126 - 1) / (downside_per_day * math.sqrt(252))
         self.assertAlmostEqual(an.sortino(prices, 0.0, 252), expected)
 
+    def test_calmar_divides_excess_return_by_worst_drawdown(self):
+        crash = history("C", [0.01] * 100 + [-0.10] + [0.01] * 151).prices
+        self.assertAlmostEqual(an.calmar(crash, 0.02, 252), (1.01**251 * 0.9 - 1 - 0.02) / 0.10)
+        steady = history("S", [0.0001] * 252).prices  # never falls: drawdown floored, not divided by zero
+        self.assertAlmostEqual(an.calmar(steady, 0.0, 252), (1.0001**252 - 1) / an.MIN_DRAWDOWN)
+
     def test_metrics_horizons(self):
         m = an.compute_metrics(history("G", [0.001] * 300), "x", {})
         self.assertAlmostEqual(m.returns["1m"], 1.001**21 - 1)
@@ -118,7 +124,7 @@ class PortfolioTest(unittest.TestCase):
         }
         funds = ["LOOSE", "BETTER", "TIGHT"]
         by_tracking = an.closest_funds("ETF", funds, histories)
-        by_sortino = an.closest_funds("ETF", funds, histories, prefer_sortino=True)
+        by_sortino = an.closest_funds("ETF", funds, histories, prefer="sortino")
         self.assertEqual([m["ticker"] for m in by_tracking], ["TIGHT", "BETTER", "LOOSE"])
         self.assertEqual([m["ticker"] for m in by_sortino], ["BETTER", "TIGHT", "LOOSE"])
         self.assertGreater(by_sortino[2]["sortino_12m"], by_sortino[0]["sortino_12m"])
@@ -129,8 +135,8 @@ class PortfolioTest(unittest.TestCase):
             m.sortino["12m"] = s
             return m
 
-        self.assertEqual(an.sortino_weights([pick("A", 3.0), pick("B", 1.0), pick("C", -2.0)], 1.0), {"A": 0.75, "B": 0.25, "C": 0.0})
-        self.assertEqual(an.sortino_weights([pick("A", -1.0), pick("B", 0.0)], 0.4), {"A": 0.2, "B": 0.2})
+        self.assertEqual(an.measure_weights([pick("A", 3.0), pick("B", 1.0), pick("C", -2.0)], 1.0, "sortino"), {"A": 0.75, "B": 0.25, "C": 0.0})
+        self.assertEqual(an.measure_weights([pick("A", -1.0), pick("B", 0.0)], 0.4, "sortino"), {"A": 0.2, "B": 0.2})
 
     def test_daily_rebalanced_backtest(self):
         histories = {"UP": history("UP", [0.002] * 300), "FLAT": history("FLAT", [0.0] * 300)}

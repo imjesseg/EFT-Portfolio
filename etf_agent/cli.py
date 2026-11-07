@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+from functools import partial
 from pathlib import Path
 
 from . import analytics as an
@@ -15,6 +16,12 @@ DEFAULT_UNIVERSE = Path(__file__).with_name("universe.json")
 RISK_FREE_TICKER = "BIL"  # 1-3 month T-bills
 FIDELITY_FUNDS = Path(__file__).with_name("fidelity_funds.json")
 FIDELITY_QUOTE_URL = "https://digital.fidelity.com/prgw/digital/research/quote/dashboard/summary?symbol={}"
+# --measure choice -> (Metrics attribute, description). Volatility-based "sharpe" is the default.
+MEASURES = {
+    "sharpe": ("reward_risk", "reward/risk (return above T-bills ÷ volatility)"),
+    "sortino": ("sortino", "Sortino (return above T-bills ÷ downside deviation)"),
+    "calmar": ("calmar", "Calmar (return above T-bills ÷ worst drawdown)"),
+}
 EXAMPLE = (
     "40% short term fixed income, 10% senior AAA rated fixed income, 10% commodities, "
     "20% growth equities, 20% defensive equities"
@@ -72,9 +79,12 @@ def triple(d: dict[str, float], fmt) -> str:
 
 
 def fidelity_matches(
-    etfs: list[str], histories: dict, use_cache: bool, prefer_sortino: bool
+    etfs: list[str], histories: dict, use_cache: bool, prefer: str | None
 ) -> tuple[dict[str, dict], dict[str, str]]:
-    """Closest Fidelity mutual funds for each ETF: {etf: {"sortino_12m", "funds"}}. Returns (matches, fetch errors)."""
+    """Closest Fidelity mutual funds for each ETF: {etf: {"sortino_12m", "calmar_12m", "funds"}}.
+
+    Returns (matches, fetch errors). ``prefer`` ("sortino"/"calmar") breaks ties among equally good matches.
+    """
     funds = [t for group in json.loads(FIDELITY_FUNDS.read_text()).values() for t in group]
     wanted = dict.fromkeys(etfs + funds + [RISK_FREE_TICKER])
     fetched, errors = fetch_all([t for t in wanted if t not in histories], use_cache)
@@ -82,8 +92,8 @@ def fidelity_matches(
     rf = an.total_return(histories[RISK_FREE_TICKER].prices, an.TRADING_DAYS) if RISK_FREE_TICKER in histories else 0.0
     matches = {
         e: {
-            "sortino_12m": an.sortino(histories[e].prices, rf, min(an.TRADING_DAYS, len(histories[e].prices) - 1)),
-            "funds": an.closest_funds(e, funds, histories, rf, prefer_sortino=prefer_sortino),
+            **an.measures_12m(histories[e].prices, rf),
+            "funds": an.closest_funds(e, funds, histories, rf, prefer=prefer),
         }
         for e in etfs
         if e in histories
@@ -91,14 +101,21 @@ def fidelity_matches(
     return matches, errors
 
 
+def prefer_measure(args) -> str | None:
+    """Fidelity tie-break measure: none for the default (pure tracking error), else the chosen ratio."""
+    return None if args.measure == "sharpe" else args.measure
+
+
 def fund_link(ticker: str) -> str:
     return f"[{ticker}]({FIDELITY_QUOTE_URL.format(ticker)})"
 
 
-def render_fidelity_table(matches: dict[str, dict], prefer_sortino: bool) -> list[str]:
+def render_fidelity_table(matches: dict[str, dict], prefer: str | None) -> list[str]:
+    shown = prefer or "sortino"
+    key, label = f"{shown}_12m", shown.capitalize()
     out = [
         "| ETF | Suggested Fidelity mutual fund | Match | Tracking error | Correlation | Beta | 12m return vs ETF "
-        "| Sortino 12m (ETF → fund) | Other candidates (tracking error, Sortino) |",
+        f"| {label} 12m (ETF → fund) | Other candidates (tracking error, {label}) |",
         "|---|---|---|---:|---:|---:|---:|---:|---|",
     ]
     for etf, match in matches.items():
@@ -106,16 +123,16 @@ def render_fidelity_table(matches: dict[str, dict], prefer_sortino: bool) -> lis
             out.append(f"| {etf} | no Fidelity fund with enough shared history | | | | | | | |")
             continue
         best, rest = match["funds"][0], match["funds"][1:]
-        others = ", ".join(f"{fund_link(f['ticker'])} ({pct(f['tracking_error'])}, {f['sortino_12m']:.2f})" for f in rest)
+        others = ", ".join(f"{fund_link(f['ticker'])} ({pct(f['tracking_error'])}, {f[key]:.2f})" for f in rest)
         out.append(
             f"| {etf} | {fund_link(best['ticker'])} {best['name']} | {an.match_quality(best)} | {pct(best['tracking_error'])} | "
             f"{best['correlation']:.2f} | {best['beta']:.2f} | {pct(best['return_gap_12m'], True)} | "
-            f"{match['sortino_12m']:.2f} → {best['sortino_12m']:.2f} | {others} |"
+            f"{match[key]:.2f} → {best[key]:.2f} | {others} |"
         )
     selection = (
         "Candidates are the 3 funds with the lowest tracking error; among those with a match as good as the closest one, "
-        "the highest 12-month Sortino is suggested."
-        if prefer_sortino
+        f"the highest 12-month {label} is suggested."
+        if prefer
         else "The fund with the lowest tracking error is suggested."
     )
     out += [
@@ -151,13 +168,14 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
                 skipped[t] = "less than 12 months of history"
         if not metrics:
             raise SystemExit(f"No usable price data for category '{key}'.")
-        ranked[key] = an.score_category(metrics, horizon_weights, args.risk_weight, "sortino" if args.sortino else "reward_risk")
+        ranked[key] = an.score_category(metrics, horizon_weights, args.risk_weight, MEASURES[args.measure][0])
 
-    weigh, weighting = (
-        (an.sortino_weights, "weights proportional to 12-month Sortino (picks with Sortino ≤ 0 get none)")
-        if args.sortino
-        else (an.inverse_vol_weights, "inverse-volatility weights")
-    )
+    if args.measure == "sharpe":
+        weigh, weighting = an.inverse_vol_weights, "inverse-volatility weights"
+    else:
+        label = args.measure.capitalize()
+        weigh = partial(an.measure_weights, measure=args.measure)
+        weighting = f"weights proportional to 12-month {label} (picks with {label} ≤ 0 get none)"
     portfolios = {}
     builders = {
         "Best-in-class": "Top-scoring ETF in each category gets the full category weight.",
@@ -191,7 +209,7 @@ def build_report(allocation: dict[str, float], universe: dict, args) -> dict:
     fidelity = None
     if args.fidelity:
         held = sorted({t for name, p in portfolios.items() if not name.startswith("Category average") for t in p["weights"]})
-        fidelity, fund_errors = fidelity_matches(held, histories, not args.no_cache, args.sortino)
+        fidelity, fund_errors = fidelity_matches(held, histories, not args.no_cache, prefer_measure(args))
         skipped.update(fund_errors)
 
     as_of = max(histories[t].dates[-1] for t in histories)
@@ -215,9 +233,7 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
         "Target mix: " + ", ".join(f"{v:g}% {universe[k]['name']}" for k, v in report["allocation"].items())
     )
     w = args.horizon_weights
-    measure = (
-        "Sortino (return above T-bills ÷ downside deviation)" if args.sortino else "reward/risk (return above T-bills ÷ volatility)"
-    )
+    measure = MEASURES[args.measure][1]
     out += [
         "",
         f"Scoring: each ETF is ranked against its category peers on 1m/3m/12m performance "
@@ -226,15 +242,15 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
         "",
         "## Sample portfolios",
         "",
-        "| Portfolio | 1m | 3m | 12m | Vol (12m) | Reward/risk (12m) | Sortino (12m) | Max drawdown (12m) |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Portfolio | 1m | 3m | 12m | Vol (12m) | Reward/risk (12m) | Sortino (12m) | Calmar (12m) | Max drawdown (12m) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, p in report["portfolios"].items():
         s = p["stats"]
         out.append(
             f"| {name} | {pct(s['returns']['1m'], True)} | {pct(s['returns']['3m'], True)} | "
             f"{pct(s['returns']['12m'], True)} | {pct(s['vol_12m'])} | {s['reward_risk_12m']:.2f} | "
-            f"{s['sortino_12m']:.2f} | {pct(s['max_drawdown_12m'])} |"
+            f"{s['sortino_12m']:.2f} | {s['calmar_12m']:.2f} | {pct(s['max_drawdown_12m'])} |"
         )
     fidelity = report["fidelity"]
     extra = (" Fidelity mutual fund |", "---|") if fidelity is not None else ("", "")
@@ -249,7 +265,7 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
                 row += f" {fund_link(funds[0]['ticker'])} ({an.match_quality(funds[0])}) |" if funds else " — |"
             out.append(row)
     if fidelity is not None:
-        out += ["", "## Fidelity mutual fund equivalents", ""] + render_fidelity_table(fidelity, args.sortino)
+        out += ["", "## Fidelity mutual fund equivalents", ""] + render_fidelity_table(fidelity, prefer_measure(args))
 
     out += ["", "## Category rankings", ""]
     for key, metrics in report["ranked"].items():
@@ -257,14 +273,14 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
             f"### {universe[key]['name']} — {report['allocation'][key]:g}% ({len(metrics)} ETFs ranked)",
             "",
             "| # | Ticker | Score | Return 1m / 3m / 12m | vs peer median 1m / 3m / 12m | Reward/risk 1m / 3m / 12m "
-            "| Sortino 1m / 3m / 12m | Vol (12m) | Max DD | Fund |",
-            "|---:|---|---:|---|---|---|---|---:|---:|---|",
+            "| Sortino 1m / 3m / 12m | Calmar 1m / 3m / 12m | Vol (12m) | Max DD | Fund |",
+            "|---:|---|---:|---|---|---|---|---|---:|---:|---|",
         ]
         for i, m in enumerate(metrics[: args.top], 1):
             out.append(
                 f"| {i} | {m.ticker} | {m.score:.2f} | {triple(m.returns, lambda x: pct(x, True))} | "
                 f"{triple(m.relative, lambda x: pct(x, True))} | {triple(m.reward_risk, lambda x: f'{x:.2f}')} | "
-                f"{triple(m.sortino, lambda x: f'{x:.2f}')} | {pct(m.vols['12m'])} | {pct(m.max_drawdown)} | {m.name} |"
+                f"{triple(m.sortino, lambda x: f'{x:.2f}')} | {triple(m.calmar, lambda x: f'{x:.2f}')} | {pct(m.vols['12m'])} | {pct(m.max_drawdown)} | {m.name} |"
             )
         out.append("")
 
@@ -280,7 +296,7 @@ def render_markdown(report: dict, universe: dict, args, notes: list[str]) -> str
 
 def to_json(report: dict) -> str:
     def metrics_dict(m: an.Metrics) -> dict:
-        keys = ("ticker", "name", "score", "returns", "relative", "reward_risk", "sortino", "vols", "max_drawdown")
+        keys = ("ticker", "name", "score", "returns", "relative", "reward_risk", "sortino", "calmar", "vols", "max_drawdown")
         return {k: getattr(m, k) for k in keys}
 
     payload = {**report, "ranked": {k: [metrics_dict(m) for m in ms] for k, ms in report["ranked"].items()}}
@@ -308,11 +324,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Weights for 1m,3m,12m (default 0.2,0.3,0.5)",
     )
     parser.add_argument(
-        "--sortino",
-        action="store_true",
-        help="Use Sortino (downside-only risk) instead of volatility: rank on Sortino, weight picks by 12-month "
-        "Sortino, and suggest the higher-Sortino Fidelity fund among equally good matches",
+        "--measure",
+        choices=MEASURES,
+        default="sharpe",
+        help="Risk-adjusted measure used to rank ETFs, weight picks, and break ties between equally good Fidelity "
+        "matches: sharpe = volatility (inverse-volatility weights, default), sortino = downside deviation, "
+        "calmar = worst drawdown",
     )
+    parser.add_argument("--sortino", dest="measure", action="store_const", const="sortino", help="Same as --measure sortino")
+    parser.add_argument("--calmar", dest="measure", action="store_const", const="calmar", help="Same as --measure calmar")
     parser.add_argument("--fidelity", action="store_true", help="Add the closest Fidelity mutual fund for every suggested ETF")
     parser.add_argument("--match", nargs="+", metavar="ETF", help="Only find the closest Fidelity mutual funds for these ETFs, e.g. --match XLP QQQ")
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
@@ -327,12 +347,12 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.match:
         etfs = [t.upper() for t in args.match]
-        matches, _ = fidelity_matches(etfs, {}, not args.no_cache, args.sortino)
+        matches, _ = fidelity_matches(etfs, {}, not args.no_cache, prefer_measure(args))
         if args.json:
             print(json.dumps(matches, indent=2))
         else:
             missing = [e for e in etfs if e not in matches]
-            lines = ["# Closest Fidelity mutual funds (last 12 months)", ""] + render_fidelity_table(matches, args.sortino)
+            lines = ["# Closest Fidelity mutual funds (last 12 months)", ""] + render_fidelity_table(matches, prefer_measure(args))
             print("\n".join(lines + ([f"\nNo price data for: {', '.join(missing)}"] if missing else [])))
         return
     if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:

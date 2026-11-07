@@ -15,7 +15,7 @@ python3 -m etf_agent "40% short term fixed income, 10% senior AAA rated fixed in
 2. Map the user's preferences to flags:
    - More return-seeking: `--risk-weight 0.2`; more risk-averse: `--risk-weight 0.8` (default 0.5).
    - Emphasize recent momentum: `--horizon-weights 0.4,0.4,0.2` (default 0.2,0.3,0.5 for 1m,3m,12m).
-   - Downside-risk focus (Sortino): `--sortino` ranks on Sortino, weights picks by 12-month Sortino, and prefers the higher-Sortino Fidelity fund among equally good matches.
+   - Risk measure: `--sortino` (downside deviation) or `--calmar` (worst drawdown) replaces volatility for ranking, weighting picks, and choosing among equally good Fidelity matches. Use Sortino when the user worries about losses rather than swings, Calmar when they care most about the worst drop.
    - More or fewer funds: `--picks N` (Diversified portfolio), `--top N` (rows per ranking table).
    - Fidelity mutual fund equivalents for the suggested ETFs: `--fidelity`. For specific ETFs only: `python3 -m etf_agent --match XLP QQQ`.
    - Use `--json` when post-processing results.
