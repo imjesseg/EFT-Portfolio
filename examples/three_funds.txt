@@ -1,0 +1,5 @@
+# Sample: a Fidelity money market fund (counted as cash) plus two Fidelity mutual funds.
+# Build the portfolio file with: python3 -m etf_agent --import-holdings examples/three_funds.txt > examples/three_funds.json
+FDRXX 100000
+FDFAX 2084
+FBGRX 602

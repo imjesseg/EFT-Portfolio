@@ -5,6 +5,7 @@ Meant to run daily. It only suggests trades; it never places them.
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -36,6 +37,7 @@ class Portfolio:
     cash: float
     account_type: str  # "tax_deferred" (IRA, 401k: taxes ignored) or "taxable"
     rules: dict
+    cash_target: float = 0.0  # fraction of the portfolio to keep in cash
 
 
 def load_portfolio(path: Path, universe: dict) -> Portfolio:
@@ -48,13 +50,152 @@ def load_portfolio(path: Path, universe: dict) -> Portfolio:
         if category not in universe:
             raise ValueError(f"{ticker}: add a \"category\" to its holding (one of: {', '.join(universe)})")
         holdings.append(Holding(ticker, float(h["shares"]), float(h["target"]) / 100, category))
-    total = sum(h.target for h in holdings)
+    cash_target = float(data.get("cash_target", 0)) / 100
+    total = sum(h.target for h in holdings) + cash_target
     if abs(total - 1) > 0.001:
-        raise ValueError(f"Holding targets add up to {total * 100:g}%, not 100%")
+        raise ValueError(f"Holding targets plus cash_target add up to {total * 100:g}%, not 100%")
     account_type = data.get("account_type", "tax_deferred")
     if account_type not in ("tax_deferred", "taxable"):
         raise ValueError('"account_type" must be "tax_deferred" or "taxable"')
-    return Portfolio(holdings, float(data.get("cash", 0)), account_type, {**DEFAULT_RULES, **data.get("rules", {})})
+    rules = {**DEFAULT_RULES, **data.get("rules", {})}
+    return Portfolio(holdings, float(data.get("cash", 0)), account_type, rules, cash_target)
+
+
+def _number(text: str) -> float:
+    return float(text.strip().replace("$", "").replace(",", "").replace("+", ""))
+
+
+def parse_positions(text: str, account: str | None = None) -> tuple[list[dict], float]:
+    """Positions from Fidelity's positions CSV export, or lines of "TICKER SHARES [CATEGORY]" and "cash AMOUNT".
+
+    Returns ([{"ticker", "shares", optional "category"}], cash). Money market funds count as cash: Fidelity's
+    core position (marked "**") and any five-letter ticker ending in "XX", the US money market convention.
+    """
+    lines = text.lstrip("\ufeff").splitlines()
+    header = next((i for i, line in enumerate(lines) if "Symbol" in line and "Quantity" in line), None)
+    positions, cash = [], 0.0
+    if header is None:
+        for n, line in enumerate(lines, 1):
+            parts = line.split("#")[0].split()
+            if not parts:
+                continue
+            if parts[0].lower() == "cash" and len(parts) == 2:
+                cash += _number(parts[1])
+            elif len(parts) in (2, 3):
+                positions.append({"ticker": parts[0].upper(), "shares": _number(parts[1]), **({"category": parts[2]} if len(parts) == 3 else {})})
+            else:
+                raise ValueError(f"line {n}: expected \"TICKER SHARES [CATEGORY]\" or \"cash AMOUNT\", got {line.strip()!r}")
+    else:
+        rows = [r for r in csv.DictReader(lines[header:]) if (r.get("Symbol") or "").strip()]
+        accounts = sorted({(r.get("Account Number") or "").strip() for r in rows} - {""})
+        if account:
+            rows = [r for r in rows if (r.get("Account Number") or "").strip() == account]
+        elif len(accounts) > 1:
+            raise ValueError(f"the export has several accounts ({', '.join(accounts)}); choose one with --account")
+        for r in rows:
+            symbol = r["Symbol"].strip()
+            if symbol.lower().startswith("pending"):
+                continue  # unsettled activity
+            if symbol.endswith("**") or not (r.get("Quantity") or "").strip():  # core money market position
+                if (r.get("Current Value") or "").strip():
+                    cash += _number(r["Current Value"])
+                continue
+            positions.append({"ticker": symbol.upper(), "shares": _number(r["Quantity"])})
+    merged: dict[str, dict] = {}
+    for p in positions:
+        if len(p["ticker"]) == 5 and p["ticker"].endswith("XX"):  # $1-a-share money market fund
+            cash += p["shares"]
+            continue
+        if p["ticker"] in merged:
+            merged[p["ticker"]]["shares"] += p["shares"]
+        else:
+            merged[p["ticker"]] = p
+    if not merged:
+        raise ValueError("no positions found")
+    return list(merged.values()), cash
+
+
+def build_portfolio(
+    positions: list[dict], cash: float, universe: dict, histories: dict[str, History],
+    allocation: dict[str, float] | None, measure: str, account_type: str,
+) -> tuple[dict, list[str]]:
+    """Turn positions into a portfolio file with targets. Returns (portfolio document, notes for the user).
+
+    Without ``allocation`` the current weights become the targets. With it, each category's share is split
+    among the funds held there by ``measure`` (inverse volatility for "reward_risk"). Funds outside the
+    ETF lists are placed in the category of the ETF they track most closely.
+    """
+    category_of = {t: key for key, spec in universe.items() for t in spec["tickers"]}
+    missing = [p["ticker"] for p in positions if p["ticker"] not in histories]
+    if missing:
+        raise ValueError(f"no price data for {', '.join(missing)}")
+    notes = []
+    for p in positions:
+        category = p.get("category") or category_of.get(p["ticker"])
+        if category is None:
+            closest = an.closest_funds(p["ticker"], [t for t in category_of if t in histories], histories, count=1)
+            if not closest:
+                raise ValueError(f"{p['ticker']}: can't place it in a category; add one after its share count")
+            category = category_of[closest[0]["ticker"]]
+            notes.append(f"{p['ticker']} placed in {category}: it tracks {closest[0]['ticker']} most closely "
+                         f"({closest[0]['tracking_error']:.1%} tracking error). Change its \"category\" if that's wrong.")
+        elif category not in universe:
+            raise ValueError(f"{p['ticker']}: unknown category {category!r}")
+        p["category"] = category
+
+    value = {p["ticker"]: p["shares"] * histories[p["ticker"]].prices[-1] for p in positions}
+    if allocation is None:
+        total = sum(value.values()) + cash
+        target = {t: v / total for t, v in value.items()}
+        cash_target = cash / total
+    else:
+        cash_target = 0.0
+        if cash:
+            notes.append(f"Your ${cash:,.0f} of cash will be invested to reach the mix; set \"cash_target\" to keep some.")
+        risk_free = {}
+        if an.RISK_FREE_TICKER in histories:
+            bil = histories[an.RISK_FREE_TICKER].prices
+            risk_free = {h: an.total_return(bil, d) for h, d in an.HORIZONS.items()}
+        target = {}
+        for category, pct in allocation.items():
+            held = [p["ticker"] for p in positions if p["category"] == category]
+            if not held:
+                raise ValueError(f"no holding in {universe[category]['name']}: buy one first or leave it out of the mix")
+            metrics = [an.compute_metrics(histories[t], category, risk_free) for t in held]
+            if any(m is None for m in metrics):
+                target.update({t: pct / 100 / len(held) for t in held})
+            elif measure == "reward_risk":
+                target.update(an.inverse_vol_weights(metrics, pct / 100))
+            else:
+                target.update(an.measure_weights(metrics, pct / 100, measure))
+        for p in positions:
+            if p["category"] not in allocation:
+                target[p["ticker"]] = 0.0
+                notes.append(f"{p['ticker']}: {p['category']} isn't in your mix, so its target is 0% and the monitor will suggest selling it.")
+        notes += [f"{t}: target 0% because its 12-month {measure} is not positive." for t, w in target.items()
+                  if w == 0 and any(p["ticker"] == t and p["category"] in allocation for p in positions)]
+
+    percents = {t: round(w * 100, 2) for t, w in target.items()}
+    cash_percent = round(cash_target * 100, 2)
+    largest = max(percents, key=percents.get)
+    percents[largest] = round(percents[largest] + 100 - cash_percent - sum(percents.values()), 2)
+    holdings = []
+    for p in positions:
+        entry = {"ticker": p["ticker"], "shares": round(p["shares"], 4), "target": percents[p["ticker"]]}
+        if p["ticker"] not in category_of:
+            entry["category"] = p["category"]
+        holdings.append(entry)
+    doc = {"account_type": account_type, "cash": round(cash, 2), "cash_target": cash_percent, "holdings": holdings,
+           "rules": dict(DEFAULT_RULES)}
+    return doc, notes
+
+
+def portfolio_json(doc: dict) -> str:
+    """The portfolio document with one holding per line, easy to read and edit by hand."""
+    holdings = ",\n".join("    " + json.dumps(h) for h in doc["holdings"])
+    return (f'{{\n  "account_type": {json.dumps(doc["account_type"])},\n  "cash": {json.dumps(doc["cash"])},\n'
+            f'  "cash_target": {json.dumps(doc.get("cash_target", 0))},\n'
+            f'  "holdings": [\n{holdings}\n  ],\n  "rules": {json.dumps(doc["rules"])}\n}}\n')
 
 
 def tickers_needed(portfolio: Portfolio, universe: dict) -> list[str]:
@@ -106,6 +247,16 @@ def check(portfolio: Portfolio, universe: dict, histories: dict[str, History], h
             reasons.append(f"{h.ticker} is {actual:.1%} of the portfolio vs a {h.target:.1%} target")
         rows.append({"ticker": h.ticker, "category": h.category, "value": value.get(h.ticker), "weight": actual,
                      "target": h.target, "drift": drift, "breached": breached})
+    cash_weight = portfolio.cash / total if total else 0.0
+    cash_drift = cash_weight - portfolio.cash_target
+    # The relative limit applies only with a cash target, so a little uninvested cash alone doesn't trigger.
+    cash_breached = abs(cash_drift) * 100 > rules["drift_points"] or (
+        portfolio.cash_target > 0 and abs(cash_drift) > rules["drift_relative"] * portfolio.cash_target
+    )
+    if cash_breached:
+        reasons.append(f"Cash is {cash_weight:.1%} of the portfolio vs a {portfolio.cash_target:.1%} target")
+    rows.append({"ticker": "Cash", "category": "cash", "value": portfolio.cash, "weight": cash_weight,
+                 "target": portfolio.cash_target, "drift": cash_drift, "breached": cash_breached})
 
     held = {h.ticker for h in portfolio.holdings}
     watch, replacements = [], {}
@@ -163,7 +314,8 @@ def check(portfolio: Portfolio, universe: dict, histories: dict[str, History], h
                          "substantially identical fund within 30 days.")
     return {"as_of": as_of, "action_needed": action, "reasons": reasons, "data_problems": problems,
             "total_value": total, "account_type": portfolio.account_type, "holdings": rows, "watch": watch,
-            "trades": trades, "notes": notes}
+            "trades": trades, "cash_after_trades": portfolio.cash_target * total if trades else portfolio.cash,
+            "notes": notes}
 
 
 def headline(report: dict) -> str:
@@ -209,6 +361,7 @@ def render(report: dict) -> str:
         out += ["", "## Proposed trades", "", "| Ticker | Action | Amount | ≈ Shares | New target |", "|---|---|---:|---:|---:|"]
         for t in report["trades"]:
             out.append(f"| {t['ticker']} | {t['action']} | {money(t['amount'])} | {t['shares']:,.1f} | {t['new_target']:.1%} |")
+        out += ["", f"Cash after these trades: {money(report['cash_after_trades'])}."]
     out += [""] + [line for n in report["notes"] for line in (f"> {n}", "")]
     out.append("_Suggestions only: review them and place any trades yourself. Not investment advice._")
     return "\n".join(out)

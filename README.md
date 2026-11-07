@@ -62,14 +62,27 @@ The candidate list of ~100 retail Fidelity mutual funds (Select sector, index, a
 
 ## Daily portfolio monitor
 
-Describe what you own in a portfolio file, then check it:
+Create a portfolio file from what you own, then check it:
 
 ```bash
-cp portfolio.example.json portfolio.json   # edit tickers, shares, and target %
+python3 -m etf_agent --import-holdings positions.csv "40% short term, 10% AAA, 10% commodities, 20% growth, 20% defensive" > portfolio.json
 python3 -m etf_agent --monitor portfolio.json --sortino
 ```
 
-Each holding has a `ticker`, `shares`, and `target` (percent; targets must add up to 100). Holdings outside the ETF lists, such as Fidelity mutual funds, need a `category`. `cash` is counted in the total and fully deployed by proposed trades. `portfolio.json` is git-ignored so your holdings stay private.
+`--import-holdings` reads either of two formats; see the samples in [`examples/`](examples/):
+
+- **Fidelity positions export** ([`fidelity_positions.csv`](examples/fidelity_positions.csv)): on Fidelity.com, open **Positions** and choose **Download**. Money market core positions (such as `SPAXX**`) count as cash; pending activity is skipped. For an export with several accounts, choose one with `--account NUMBER`. Columns are found by name (`Symbol`, `Quantity`, `Current Value`, `Account Number`).
+- **A plain list** ([`holdings.txt`](examples/holdings.txt)): one `TICKER SHARES [CATEGORY]` per line, plus `cash AMOUNT`. Money market funds (five-letter tickers ending in `XX`, such as `FDRXX`) count as cash.
+
+With a mix, each category's target is split among the funds you hold there by `--measure` (inverse volatility by default; Sortino or Calmar weights can set a fund with no return above T-bills to 0%). Without a mix, your current weights, including cash, become the targets. Funds outside the ETF lists, such as Fidelity mutual funds, are placed in the category of the ETF they track most closely, and the import says so. Use `--account-type taxable` for brokerage accounts. Review the printed file before relying on it.
+
+The portfolio file ([`examples/portfolio.json`](examples/portfolio.json)) lists each holding's `ticker`, `shares`, and `target` (percent), plus a `category` for funds outside the ETF lists. You can also write or edit it by hand. `cash` is counted in the total. Set `cash_target` (percent) to keep part of the portfolio in cash, for example a money market fund held as your short-term allocation; holding targets plus `cash_target` must add up to 100. Cash is checked against its target with the same 5/25 rule, and proposed trades leave it at its target. Without a `cash_target`, cash is invested once it passes 5% of the portfolio. `portfolio.json` is git-ignored so your holdings stay private. Don't commit it even once: git keeps tracking a committed file and ignores `.gitignore` for it, so later edits with real holdings would reach the public repo.
+
+To try the monitor without your own holdings, use the committed sample [`examples/three_funds.json`](examples/three_funds.json), built from [`examples/three_funds.txt`](examples/three_funds.txt): $100,000 in the FDRXX money market (kept as cash with a 21.2% `cash_target`), FDFAX, and FBGRX.
+
+```bash
+python3 -m etf_agent --monitor examples/three_funds.json
+```
 
 The check suggests a rebalance when either rule fires:
 
@@ -82,7 +95,7 @@ Set `"account_type": "tax_deferred"` for IRAs and 401(k)s, where taxes don't app
 
 ### Email and scheduling
 
-Add `--email` to send the report by email after each check, or `--email action` to send only when a rebalance is suggested or prices are missing. Mail goes through any SMTP server, configured with environment variables. For Gmail, use an [app password](https://myaccount.google.com/apppasswords), which needs 2-Step Verification:
+Add `--email` to send the report by email only when a rebalance is suggested or prices are missing, so quiet days stay quiet. Use `--email always` to get it after every check. Mail goes through any SMTP server, configured with environment variables. For Gmail, use an [app password](https://myaccount.google.com/apppasswords), which needs 2-Step Verification:
 
 ```bash
 # ~/.etf-agent.env  (chmod 600 — it holds a password)
@@ -100,7 +113,7 @@ Then schedule it with `crontab -e`, for example at 9 p.m. on weekdays, after mut
 0 21 * * 1-5  . $HOME/.etf-agent.env && cd $HOME/EFT-Portfolio && python3 -m etf_agent --monitor portfolio.json --sortino --email >> $HOME/etf-monitor.log 2>&1
 ```
 
-Cron uses the machine's time zone, so adjust the hour if it isn't Eastern.
+Cron uses the machine's time zone, so adjust the hour if it isn't Eastern. Until you have your own `portfolio.json`, you can point it at `examples/three_funds.json`.
 
 ## Categories
 

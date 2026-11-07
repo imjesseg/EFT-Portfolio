@@ -1,0 +1,14 @@
+# One holding per line: TICKER SHARES [CATEGORY]. Lines starting with # are ignored.
+# CATEGORY is optional; funds outside the ETF lists are placed automatically.
+# Import with: python3 -m etf_agent --import-holdings examples/holdings.txt "40% short term, 10% AAA, 10% commodities, 20% growth, 20% defensive" > portfolio.json
+USFR 400.45
+MINT 99.75
+FCNVX 998.4
+PAAA 196.96
+COMT 148.85
+FTGC 169.81
+QQQM 33.72
+FSPGX 205.47
+XLV 59.6
+FDFAX 106.82
+cash 2500

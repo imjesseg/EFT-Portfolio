@@ -1,0 +1,10 @@
+{
+  "account_type": "tax_deferred",
+  "cash": 100000.0,
+  "cash_target": 21.2,
+  "holdings": [
+    {"ticker": "FDFAX", "shares": 2084.0, "target": 45.08, "category": "defensive_equity"},
+    {"ticker": "FBGRX", "shares": 602.0, "target": 33.72, "category": "growth_equity"}
+  ],
+  "rules": {"drift_points": 5.0, "drift_relative": 0.25, "laggard_weeks": 4, "replace_margin": 0.25, "stale_days": 4}
+}

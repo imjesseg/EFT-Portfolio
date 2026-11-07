@@ -167,11 +167,26 @@ class MonitorTest(unittest.TestCase):
         # A at 13% vs 10% is only 3 points off but 30% of its target: outside the 5/25 band.
         report = self.run_check(13, 87)
         self.assertTrue(report["action_needed"])
-        self.assertEqual([r["breached"] for r in report["holdings"]], [True, False])
+        self.assertEqual([r["breached"] for r in report["holdings"]], [True, False, False])  # A, B, cash
         trades = {t["ticker"]: (t["action"], round(t["amount"], 2)) for t in report["trades"]}
         self.assertEqual(trades, {"A": ("sell", 300.0), "B": ("buy", 300.0)})
         # 12% is 2 points and 20% of target: inside both limits.
         self.assertFalse(self.run_check(12, 88)["action_needed"])
+
+    def test_cash_target_is_held_and_small_untargeted_cash_is_ignored(self):
+        flat = {"A": history("A", [0.0] * 300)}  # price stays at 100
+
+        def check(shares, cash, cash_target):
+            holding = monitor.Holding("A", shares, 1 - cash_target, "cat")
+            portfolio = monitor.Portfolio([holding], cash, "tax_deferred", dict(monitor.DEFAULT_RULES), cash_target)
+            return monitor.check(portfolio, self.UNIVERSE, flat, {"1m": 1, "3m": 1, "12m": 1}, 0.5, "reward_risk")
+
+        self.assertFalse(check(80, 2000, 0.20)["action_needed"])  # cash on its 20% target
+        over = check(70, 3000, 0.20)  # cash at 30%
+        self.assertIn("Cash is 30.0%", over["reasons"][-1])
+        self.assertEqual([(t["ticker"], t["action"], round(t["amount"])) for t in over["trades"]], [("A", "buy", 1000)])
+        self.assertAlmostEqual(over["cash_after_trades"], 2000)
+        self.assertFalse(check(98, 200, 0.0)["action_needed"])  # 2% stray cash with no cash target
 
     def test_stale_prices_block_action(self):
         histories = {t: history(t, [0.0] * 300) for t in ("A", "C")}
@@ -200,6 +215,53 @@ class MonitorTest(unittest.TestCase):
         slump = check(noisy(0.003, 295) + [-0.05] * 5)
         self.assertFalse(slump["watch"][0]["replace"])
         self.assertFalse(slump["action_needed"])
+
+
+class ImportHoldingsTest(unittest.TestCase):
+    EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+    def test_sample_files_parse_the_same(self):
+        csv_positions, csv_cash = monitor.parse_positions((self.EXAMPLES / "fidelity_positions.csv").read_text())
+        text_positions, text_cash = monitor.parse_positions((self.EXAMPLES / "holdings.txt").read_text())
+        # The money market core position is cash; pending activity and the disclaimer footer are skipped.
+        self.assertEqual((csv_positions, csv_cash), (text_positions, text_cash))
+        self.assertEqual(csv_cash, 2500.0)
+        self.assertEqual(csv_positions[2], {"ticker": "FCNVX", "shares": 998.4})
+        self.assertEqual(monitor.parse_positions("FDRXX 1000\nXLP 2")[1], 1000.0)  # money market fund = cash
+
+    def test_multi_account_export_needs_an_account(self):
+        export = "Account Number,Symbol,Quantity,Current Value\nA1,XLP,10,$800\nB2,XLP,5,$400\nB2,XLV,2,$300\n"
+        with self.assertRaises(ValueError):
+            monitor.parse_positions(export)
+        self.assertEqual(monitor.parse_positions(export, "B2")[0], [{"ticker": "XLP", "shares": 5.0}, {"ticker": "XLV", "shares": 2.0}])
+
+    def test_targets_follow_the_mix_and_unlisted_funds_find_a_category(self):
+        rng = random.Random(5)
+        growth = [rng.gauss(0.001, 0.01) for _ in range(300)]
+        universe = {
+            "growth": {"name": "Growth", "aliases": [], "tickers": ["G1", "G2"]},
+            "bonds": {"name": "Bonds", "aliases": [], "tickers": ["B1"]},
+        }
+        histories = {
+            "G1": history("G1", growth),
+            "G2": history("G2", [rng.gauss(0.001, 0.02) for _ in range(300)]),
+            "B1": history("B1", [rng.gauss(0.0002, 0.002) for _ in range(300)]),
+            "FUND": history("FUND", [r + rng.gauss(0, 0.001) for r in growth]),  # a mutual fund that tracks G1
+        }
+        positions = [{"ticker": "G2", "shares": 10}, {"ticker": "FUND", "shares": 10}, {"ticker": "B1", "shares": 30}]
+        doc, notes = monitor.build_portfolio(positions, 0.0, universe, histories, {"growth": 60, "bonds": 40}, "reward_risk", "taxable")
+        targets = {h["ticker"]: h["target"] for h in doc["holdings"]}
+        self.assertAlmostEqual(targets["G2"] + targets["FUND"], 60, places=2)
+        self.assertEqual(targets["B1"], 40)
+        self.assertGreater(targets["FUND"], targets["G2"])  # inverse volatility favors the calmer fund
+        self.assertEqual(doc["holdings"][1]["category"], "growth")
+        self.assertIn("G1", notes[0])
+        self.assertEqual(doc["account_type"], "taxable")
+        # The written file loads back as a valid portfolio.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "portfolio.json"
+            path.write_text(monitor.portfolio_json(doc))
+            self.assertEqual(len(monitor.load_portfolio(path, universe).holdings), 3)
 
 
 class DataFallbackTest(unittest.TestCase):

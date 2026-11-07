@@ -344,12 +344,24 @@ def main(argv: list[str] | None = None) -> None:
         help="Check a portfolio file (default portfolio.json) for drift and laggards and propose trades",
     )
     parser.add_argument(
+        "--import-holdings",
+        type=Path,
+        metavar="FILE",
+        help="Build a portfolio file from a Fidelity positions CSV or a 'TICKER SHARES' list and print it; targets "
+        "come from a mix given as the allocation (split by --measure), else from current weights",
+    )
+    parser.add_argument("--account", help="With --import-holdings, the account number to use from a multi-account export")
+    parser.add_argument(
+        "--account-type", choices=["tax_deferred", "taxable"], default="tax_deferred",
+        help="With --import-holdings: tax_deferred (IRA, 401k; default) or taxable",
+    )
+    parser.add_argument(
         "--email",
         nargs="?",
-        const="always",
-        choices=["always", "action"],
-        help="With --monitor, email the report (SMTP settings from environment variables): every run (default), "
-        "or 'action' only when a rebalance is suggested or prices are missing",
+        const="action",
+        choices=["action", "always"],
+        help="With --monitor, email the report (SMTP settings from environment variables): only when a rebalance "
+        "is suggested or prices are missing (default), or 'always' after every run",
     )
     parser.add_argument("--universe", type=Path, default=DEFAULT_UNIVERSE, help="Category/ETF universe JSON file")
     parser.add_argument("--no-cache", action="store_true", help="Re-download prices even if cached today")
@@ -373,6 +385,27 @@ def main(argv: list[str] | None = None) -> None:
         return
     if len(args.horizon_weights) != 3 or not 0 <= args.risk_weight <= 1:
         parser.error("--horizon-weights needs 3 numbers and --risk-weight must be between 0 and 1")
+    if args.import_holdings:
+        try:
+            positions, cash = monitor.parse_positions(args.import_holdings.read_text(), args.account)
+            allocation = parse_allocation(" ".join(args.allocation), universe)[0] if args.allocation else None
+        except (OSError, ValueError) as exc:
+            parser.error(f"{args.import_holdings}: {exc}")
+        needs_matching = any("category" not in p and not any(p["ticker"] in s["tickers"] for s in universe.values()) for p in positions)
+        tickers = [p["ticker"] for p in positions] + [an.RISK_FREE_TICKER]
+        if needs_matching:
+            tickers += [t for spec in universe.values() for t in spec["tickers"]]
+        histories, _ = fetch_all(list(dict.fromkeys(tickers)), use_cache=not args.no_cache)
+        try:
+            doc, notes = monitor.build_portfolio(
+                positions, cash, universe, histories, allocation, MEASURES[args.measure][0], args.account_type
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(monitor.portfolio_json(doc), end="")
+        for note in notes:
+            print(f"Note: {note}", file=sys.stderr)
+        return
     if args.monitor:
         try:
             portfolio = monitor.load_portfolio(args.monitor, universe)
